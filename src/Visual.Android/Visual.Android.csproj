@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0-android</TargetFramework>
+    <SupportedOSPlatformVersion>24</SupportedOSPlatformVersion>
+    <OutputType>Exe</OutputType>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>VisualApp</RootNamespace> <!-- "Visual.Android" would shadow the Android.* namespaces -->
+    <ApplicationId>com.visual.isf</ApplicationId>
+    <ApplicationTitle>Visual</ApplicationTitle>
+    <ApplicationVersion>1</ApplicationVersion>
+    <ApplicationDisplayVersion>1.0</ApplicationDisplayVersion>
+    <!-- a plain .apk to sideload (not a Play Store bundle); signed with the debug key -->
+    <AndroidPackageFormat>apk</AndroidPackageFormat>
+    <RuntimeIdentifiers>android-arm;android-arm64</RuntimeIdentifiers>
+    <!-- ponytail: no trimming, Silk.NET + System.Text.Json reflection stay intact; costs APK size -->
+    <AndroidLinkMode>None</AndroidLinkMode>
+    <PublishTrimmed>false</PublishTrimmed>
+    <RunAOTCompilation>false</RunAOTCompilation>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="QRCoder" Version="1.6.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Visual.Core\Visual.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AndroidAsset Include="..\..\shaders\*.fs" Link="Assets\shaders\%(Filename)%(Extension)" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Visual remoto</title>
+<style>
+:root{color-scheme:dark;--bg:#111;--fg:#eee;--mut:#888;--acc:#4af;--card:#1c1c1c}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px system-ui,sans-serif;-webkit-user-select:none;user-select:none}
+nav{position:sticky;top:0;display:flex;background:#000;z-index:1}
+nav button{flex:1;padding:14px 0;background:none;border:0;border-bottom:3px solid transparent;color:var(--mut);font-size:16px}
+nav button.on{color:var(--fg);border-color:var(--acc)}
+main{padding:12px 16px 40px;max-width:640px;margin:auto}
+.big{display:block;width:100%;padding:22px;margin:10px 0;font-size:22px;border-radius:12px;border:0;background:#2a2a2a;color:var(--fg)}
+#strobe{background:#5a1a1a;touch-action:none}
+#strobe.on{background:#fff;color:#000}
+.row{display:flex;align-items:center;gap:8px;margin:10px 0;flex-wrap:wrap}
+.row>label{flex:1 1 40%}
+.row>span{min-width:3.5em;text-align:right;color:var(--mut)}
+input[type=range]{flex:1 1 50%}
+input[type=checkbox]{width:24px;height:24px}
+select,input[type=number],button.sm{background:#2a2a2a;color:var(--fg);border:1px solid #333;border-radius:6px;padding:8px;font-size:16px}
+.mod{margin:0 0 14px 6px;padding-left:10px;border-left:2px solid #333}
+.scene{display:block;width:100%;text-align:left;padding:14px;margin:6px 0;background:var(--card);border:0;border-radius:8px;color:var(--fg);font-size:16px}
+.scene.cur{outline:2px solid var(--acc)}
+.bar{height:8px;background:#333;border-radius:4px;margin:2px 0 8px}
+.bar i{display:block;height:100%;background:var(--acc);border-radius:4px}
+h3{margin:22px 0 6px;color:var(--mut);font-size:13px;text-transform:uppercase;letter-spacing:.05em}
+#err{color:#f77;padding:0 16px}
+#tag{position:fixed;right:12px;bottom:12px;padding:6px 12px;border-radius:6px;background:#fd4;color:#000;font-weight:bold;display:none}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:#5e8;margin-right:6px}
+.off>*{opacity:.45}
+.off>.row:first-child{opacity:1}
+.off>.row:first-child>:not(label){opacity:.45}
+label>input[type=checkbox]{margin:0 8px 0 0;vertical-align:middle}
+.scene small{display:block;color:#5e8;margin-top:4px}
+</style>
+</head>
+<body>
+<nav><button data-t="live" class="on">En vivo</button><button data-t="scene">Escena</button><button data-t="proj">Proyecto</button></nav>
+<p id="err"></p>
+<div id="tag">STROBE</div>
+<main id="m"></main>
+<p id="note" style="padding:0 16px 24px;color:#5e8"></p>
+<script>
+const K = new URLSearchParams(location.search).get('k') || '';
+const BANDS = ['Graves', 'Medios', 'Agudos'], BANDS_V = ['Bass', 'Mid', 'High'];
+const KINDS = ['Constante', 'Lineal', 'Audio'], KINDS_V = ['Constant', 'Linear', 'Audio'];
+const m = document.getElementById('m');
+let S = null, tab = 'live', sig = '', busy = false, lastEdit = 0;
+
+// ---- network ----
+const post = c => fetch('/cmd?k=' + encodeURIComponent(K), { method: 'POST', body: JSON.stringify(c) }).catch(() => {});
+const pending = new Map(); // slider drags: send the latest value per control every 100 ms
+const edit = (key, c) => { lastEdit = Date.now(); pending.set(key, c); };
+setInterval(() => { for (const c of pending.values()) post(c); pending.clear(); }, 100);
+
+async function poll() {
+  try {
+    const r = await fetch('/state?k=' + encodeURIComponent(K), { cache: 'no-store' });
+    if (!r.ok) throw r.status === 403 ? 'Código inválido: escaneá de nuevo el QR' : 'Error ' + r.status;
+    S = await r.json();
+    document.getElementById('err').textContent = '';
+    const s = JSON.stringify([tab, S.Project, S.Loaded, S.Projects, S.Shaders, S.Current, S.Scenes, S.Shuffle, S.Crossfade,
+      S.CrossfadeSeconds, S.Inputs, S.Params, S.Effects, S.AutoStrobe, S.MaxHz, S.Device]);
+    // don't rebuild under the user's finger: wait until they stop touching / typing
+    const typing = document.activeElement && document.activeElement.matches('select,input[type=number]');
+    if (s !== sig && !busy && !typing && Date.now() - lastEdit > 1500) { sig = s; render(); }
+    live();
+  } catch (e) {
+    document.getElementById('err').textContent = typeof e === 'string' ? e : 'Sin conexión con la PC';
+  }
+  setTimeout(poll, 300);
+}
+document.addEventListener('pointerdown', () => busy = true);
+for (const n of ['pointerup', 'pointercancel']) document.addEventListener(n, () => { busy = false; lastEdit = Date.now(); });
+document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
+  tab = b.dataset.t;
+  document.querySelectorAll('nav button').forEach(x => x.classList.toggle('on', x === b));
+  sig = '';
+  if (S) render();
+});
+
+// ---- widgets (textContent only: names come from files) ----
+function el(t, a = {}, ...kids) {
+  const e = document.createElement(t);
+  for (const k in a) k.startsWith('on') ? e.addEventListener(k.slice(2), a[k]) : k === 'class' ? e.className = a[k] : e[k] = a[k];
+  e.append(...kids);
+  return e;
+}
+const add = (...k) => m.append(...k);
+const row = (label, ...ctl) => el('div', { class: 'row' }, el('label', { textContent: label }), ...ctl);
+const btn = (t, f) => el('button', { class: 'sm', textContent: t, onclick: f });
+const fmt = x => Math.abs(x) >= 100 ? x.toFixed(0) : Math.abs(x) >= 10 ? x.toFixed(1) : (x.toFixed(3).replace(/\.?0+$/, '') || '0');
+function slider(label, v, min, max, on, log) {
+  const pos = x => log ? Math.log(x / min) / Math.log(max / min) : (max === min ? 0 : (x - min) / (max - min));
+  const val = p => log ? min * Math.pow(max / min, p) : min + p * (max - min);
+  const out = el('span', { textContent: fmt(v) });
+  const r = el('input', { type: 'range', min: 0, max: 1000, value: Math.round(pos(v) * 1000),
+    oninput: () => { const x = val(r.value / 1000); out.textContent = fmt(x); on(x); } });
+  return row(label, r, out);
+}
+function selEl(opts, idx, on) {
+  const s = el('select', { onchange: () => on(s.selectedIndex) }, ...opts.map(o => el('option', { textContent: o })));
+  s.selectedIndex = idx;
+  return s;
+}
+const sel = (label, opts, idx, on) => row(label, selEl(opts, idx, on));
+function chk(label, v, on) {
+  const c = el('input', { type: 'checkbox', checked: v, onchange: () => on(c.checked) });
+  return row(label, c);
+}
+function num(v, on) {
+  const n = el('input', { type: 'number', value: v, step: 'any', inputMode: 'decimal',
+    onchange: () => { const x = parseFloat(n.value); if (isFinite(x)) on(Math.max(0, x)); } });
+  return n;
+}
+const hex = v => '#' + [0, 1, 2].map(k => Math.round(Math.min(1, Math.max(0, v[k])) * 255).toString(16).padStart(2, '0')).join('');
+
+// value + modifier, like the PC panel
+function paramEd(label, ps, min, max, labels, key, mk) {
+  const go = () => edit(key, mk());
+  if (labels) return [sel(label, labels, Math.round(ps.Value[0]), i => { ps.Value[0] = i; go(); })];
+  const md = ps.Mod, box = el('div', { class: 'mod' });
+  const fill = () => {
+    box.replaceChildren(sel('Modificador', KINDS, KINDS_V.indexOf(md.Kind), i => { md.Kind = KINDS_V[i]; go(); fill(); }));
+    if (md.Kind === 'Linear') box.append(
+      slider('Velocidad (recorridos/s)', md.Speed, 0.001, 5, x => { md.Speed = x; go(); }, true),
+      sel('Al llegar al borde', ['Reiniciar', 'Rebotar'], md.Mode === 'PingPong' ? 1 : 0, i => { md.Mode = i ? 'PingPong' : 'Loop'; go(); }));
+    if (md.Kind === 'Audio') box.append(
+      sel('Banda', BANDS, BANDS_V.indexOf(md.Band), i => { md.Band = BANDS_V[i]; go(); }),
+      slider('Intensidad', md.Amount, -1, 1, x => { md.Amount = x; go(); }),
+      slider('Ganancia', md.Gain, 0.1, 10, x => { md.Gain = x; go(); }, true),
+      slider('Umbral', md.Threshold, 0, 0.95, x => { md.Threshold = x; go(); }),
+      chk('Auto-ganancia', md.AutoGain, b => { md.AutoGain = b; go(); }));
+  };
+  fill();
+  return [slider(label, ps.Value[0], min, max, x => { ps.Value[0] = x; go(); }), box];
+}
+
+// ---- tabs ----
+function render() {
+  m.replaceChildren();
+  ({ live: renderLive, scene: renderScene, proj: renderProj })[tab]();
+  live();
+}
+
+function renderLive() {
+  add(el('h3', { textContent: S.Project }), el('div', { id: 'now' }));
+  add(el('button', { class: 'big', textContent: 'Siguiente escena ▶', onclick: () => post({ op: 'next' }) }));
+  const st = el('button', { class: 'big', id: 'strobe', textContent: 'STROBE (mantener)' });
+  let t = null; // keep re-sending while held: the PC drops the strobe 1 s after the last one
+  const on = e => { e.preventDefault(); if (t) return; st.classList.add('on'); post({ op: 'strobe', on: true }); t = setInterval(() => post({ op: 'strobe', on: true }), 400); };
+  const off = () => { if (!t) return; clearInterval(t); t = null; st.classList.remove('on'); post({ op: 'strobe', on: false }); };
+  st.addEventListener('pointerdown', on);
+  for (const n of ['pointerup', 'pointercancel', 'pointerleave']) st.addEventListener(n, off);
+  st.oncontextmenu = e => e.preventDefault();
+  add(st);
+  add(chk('Auto strobe', S.AutoStrobe.Enabled, b => { S.AutoStrobe.Enabled = b; edit('auto', { op: 'autostrobe', value: S.AutoStrobe }); }));
+  add(el('div', { id: 'bands' }));
+  add(el('h3', { textContent: 'Escenas' }));
+  S.Scenes.forEach((s, i) => add(el('button', { class: 'scene' + (i === S.Current ? ' cur' : ''), onclick: () => post({ op: 'goto', i }) },
+    (i + 1) + '. ' + s.Shader, ...(s.Fx.length ? [el('small', { textContent: s.Fx.join(' · ') })] : []))));
+}
+
+function live() { // cheap updates every poll, no rebuild
+  document.getElementById('tag').style.display = S.Strobe ? 'block' : 'none';
+  const n = document.getElementById('now');
+  if (n) {
+    const s = S.Scenes[S.Current];
+    n.textContent = s ? `${S.Current + 1}. ${s.Shader} · ${S.SceneTime.toFixed(0)} s${s.Duration > 0 ? ' / ' + s.Duration + ' s' : ''}` : 'Sin escenas';
+  }
+  const b = document.getElementById('bands');
+  if (b) b.replaceChildren(...S.Bands.map((v, i) => el('div', {}, el('small', { textContent: BANDS[i] }),
+    el('div', { class: 'bar' }, el('i', { style: `width:${Math.min(100, v * 100)}%` })))));
+}
+
+function renderScene() {
+  const i = S.Current, s = S.Scenes[i];
+  if (s) {
+    add(el('h3', { textContent: `Escena ${i + 1}: ${s.Shader}` }));
+    add(row('Duración (s, 0 = manual)', num(s.Duration, x => { s.Duration = x; edit('dur', { op: 'duration', scene: i, value: x }); })));
+    add(el('div', { class: 'row' },
+      btn('Subir', () => post({ op: 'move', i, to: i - 1 })),
+      btn('Bajar', () => post({ op: 'move', i, to: i + 1 })),
+      btn('Quitar', () => { if (confirm('¿Quitar esta escena del proyecto?')) post({ op: 'remove', i }); })));
+    for (const inp of S.Inputs) {
+      const ps = S.Params && S.Params[inp.Name];
+      if (!ps) continue;
+      const key = 'p:' + inp.Name, mk = () => ({ op: 'param', scene: i, name: inp.Name, state: ps }), go = () => edit(key, mk());
+      switch (inp.Type) {
+        case 'Float': add(...paramEd(inp.Label, ps, inp.Min[0], inp.Max[0], null, key, mk)); break;
+        case 'Long': add(sel(inp.Label, inp.Labels, inp.Values.indexOf(Math.round(ps.Value[0])), j => { ps.Value[0] = inp.Values[j]; go(); })); break;
+        case 'Bool': add(chk(inp.Label, ps.Value[0] > 0.5, b => { ps.Value[0] = b ? 1 : 0; go(); })); break;
+        case 'Event': add(el('button', { class: 'big', textContent: inp.Label, onclick: () => post({ op: 'param', scene: i, name: inp.Name, state: { ...ps, Value: [1] } }) })); break;
+        case 'Point2D':
+          add(slider(inp.Label + ' X', ps.Value[0], inp.Min[0], inp.Max[0], x => { ps.Value[0] = x; go(); }),
+              slider(inp.Label + ' Y', ps.Value[1], inp.Min[1], inp.Max[1], x => { ps.Value[1] = x; go(); }));
+          break;
+        case 'Color': {
+          const c = el('input', { type: 'color', value: hex(ps.Value),
+            oninput: () => { for (let k = 0; k < 3; k++) ps.Value[k] = parseInt(c.value.substr(1 + 2 * k, 2), 16) / 255; go(); } });
+          add(row(inp.Label, c), slider(inp.Label + ' alfa', ps.Value[3], 0, 1, x => { ps.Value[3] = x; go(); }));
+          break;
+        }
+      }
+    }
+    add(el('h3', { textContent: 'Efectos de la escena' }));
+    for (const d of S.EffectDefs) {
+      const ps = S.Effects && S.Effects[d.Name];
+      if (!ps) continue;
+      const max = d.Name === 'strobeRate' ? Math.min(d.Max, S.MaxHz) : d.Max;
+      const mk = () => ({ op: 'effect', scene: i, name: d.Name, state: ps });
+      const r = paramEd(d.Label, ps, d.Min, max, d.Labels, 'e:' + d.Name, mk);
+      const lbl = r[0].querySelector('label');
+      if (!ps.Off && (ps.Mod.Kind !== 'Constant' || Math.abs(ps.Value[0] - d.Default) > 1e-4)) lbl.prepend(el('i', { class: 'dot' }));
+      // on/off switch: off keeps the settings
+      const box = el('div', { className: ps.Off ? 'off' : '' }, ...r);
+      const cb = el('input', { type: 'checkbox', checked: !ps.Off,
+        onchange: () => { ps.Off = !cb.checked; box.className = ps.Off ? 'off' : ''; edit('e:' + d.Name, mk()); } });
+      lbl.prepend(cb);
+      add(box);
+    }
+    add(el('div', { class: 'row' },
+      btn('Restablecer efectos', () => { if (confirm('¿Volver los efectos de esta escena a sus valores por defecto?')) post({ op: 'resetEffects', scene: i }); }),
+      btn('Copiar a todas las escenas', () => { if (confirm('¿Reemplazar los efectos de las otras escenas por estos?')) post({ op: 'copyEffects', scene: i }); })));
+  } else add(el('p', { textContent: 'Sin escenas.' }));
+  add(el('h3', { textContent: 'Agregar escena' }));
+  let pick = 0;
+  add(row('Shader', selEl(S.Shaders, 0, j => pick = j), btn('Agregar', () => post({ op: 'add', shader: S.Shaders[pick] }))));
+  const msg = document.getElementById('note'); // outside main: survives the rebuild when the list changes
+  const file = el('input', { type: 'file', accept: '.fs', multiple: true, style: 'display:none', onchange: async () => {
+    for (const f of file.files) {
+      msg.textContent = 'Subiendo ' + f.name + '…';
+      await fetch('/upload?k=' + encodeURIComponent(K) + '&name=' + encodeURIComponent(f.name), { method: 'POST', body: await f.text() }).catch(() => {});
+    }
+    const names = [...file.files].map(f => f.name);
+    // the host saves it on its next frame; confirm by seeing it in the shader list
+    setTimeout(() => {
+      const bad = names.filter(n => !S.Shaders.includes(n));
+      msg.textContent = bad.length ? 'No se pudo subir: ' + bad.join(', ') + ' (tiene que ser un .fs válido)' : 'Subido: ' + names.join(', ');
+    }, 1500);
+  } });
+  add(file, btn('Subir shader (.fs)…', () => file.click()));
+}
+
+function renderProj() {
+  const d = S.Device; // only the TV / Android app sends this
+  if (d) {
+    add(el('h3', { textContent: 'Este dispositivo' }));
+    const src = d.Sources.map(s => s.Id), SCALES = [1, 0.75, 0.5, 0.35];
+    add(sel('Fuente de sonido', d.Sources.map(s => s.Label), src.indexOf(d.Source), j => post({ op: 'device', source: src[j] })),
+        sel('Resolución interna', ['100 %', '75 %', '50 %', '35 %'], SCALES.reduce((b, s, k) => Math.abs(s - d.Scale) < Math.abs(SCALES[b] - d.Scale) ? k : b, 0),
+          j => post({ op: 'device', scale: SCALES[j] })),
+        sel('Cuadros por segundo', ['60', '30'], d.Fps >= 60 ? 0 : 1, j => post({ op: 'device', fps: j ? 30 : 60 })),
+        el('p', { textContent: 'Si va lento o se traba, bajá la resolución interna o pasá a 30 cuadros. Los equipos USB aparecen al conectarlos.' }));
+  }
+  add(row('Abrir', selEl(S.Projects, S.Projects.indexOf(S.Loaded), j => post({ op: 'open', name: S.Projects[j] }))));
+  add(el('div', { class: 'row' }, btn('Guardar', () => post({ op: 'save' })), btn('Nuevo', () => post({ op: 'new' })), btn('Duplicar', () => post({ op: 'duplicate' }))));
+  const pj = () => edit('proj', { op: 'project', shuffle: S.Shuffle, crossfade: S.Crossfade, crossfadeSeconds: S.CrossfadeSeconds });
+  add(chk('Orden aleatorio', S.Shuffle, b => { S.Shuffle = b; pj(); }),
+      chk('Fundido entre escenas', S.Crossfade, b => { S.Crossfade = b; pj(); }),
+      slider('Duración del fundido (s)', S.CrossfadeSeconds, 0.1, 10, x => { S.CrossfadeSeconds = x; pj(); }));
+
+  add(el('h3', { textContent: 'Auto strobe' }));
+  const a = S.AutoStrobe, go = () => edit('auto', { op: 'autostrobe', value: a });
+  add(chk('Activado', a.Enabled, b => { a.Enabled = b; go(); }),
+      sel('Banda', BANDS, BANDS_V.indexOf(a.Band), i => { a.Band = BANDS_V[i]; go(); }),
+      slider('Ganancia', a.Gain, 0.1, 10, x => { a.Gain = x; go(); }, true),
+      slider('Umbral', a.Threshold, 0.05, 1, x => { a.Threshold = x; go(); }),
+      slider('Probabilidad (%)', a.Probability, 0, 100, x => { a.Probability = x; go(); }),
+      sel('Duración', ['Fija', 'Al azar'], a.RandomDuration ? 1 : 0, i => { a.RandomDuration = i === 1; go(); render(); }));
+  if (a.RandomDuration) add(
+      slider('Mínimo (s)', a.MinDuration, 0.1, 30, x => { a.MinDuration = Math.min(x, a.MaxDuration); go(); }),
+      slider('Máximo (s)', a.MaxDuration, 0.1, 30, x => { a.MaxDuration = Math.max(x, a.MinDuration); go(); }));
+  else add(slider('Segundos', a.Duration, 0.1, 30, x => { a.Duration = x; go(); }));
+  add(slider('Enfriamiento (s)', a.Cooldown, 0, 120, x => { a.Cooldown = x; go(); }),
+      sel('Ritmo', ['Lineal (Strobe Hz)', 'Sigue la banda'], a.Rhythm === 'Beat' ? 1 : 0, i => { a.Rhythm = i ? 'Beat' : 'Linear'; go(); }),
+      sel('Al terminar', ['Seguir en la escena', 'Pasar a la siguiente'], a.NextScene ? 1 : 0, i => { a.NextScene = i === 1; go(); }));
+  add(el('h3', { textContent: 'Destello del auto strobe' }),
+      slider('Strobe Hz', Math.min(a.Rate, S.MaxHz), 0.5, S.MaxHz, x => { a.Rate = x; go(); }),
+      slider('Strobe duración', a.Duty, 0.05, 0.95, x => { a.Duty = x; go(); }),
+      slider('Strobe intensidad', a.Intensity, 0, 1, x => { a.Intensity = x; go(); }),
+      sel('Strobe modo', ['Blanco', 'Negro', 'Invertir'], a.Mode, i => { a.Mode = i; go(); }),
+      el('p', { textContent: 'No se dispara mientras la escena que suena tiene su propio strobe. El botón STROBE del teléfono usa este destello.' }));
+}
+
+poll();
+</script>
+</body>
+</html>
