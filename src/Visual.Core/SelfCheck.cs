@@ -36,6 +36,7 @@ public static class SelfCheck
         AutoStrobeCheck();
         EffectsCheck();
         RemoteCheck();
+        NetAudioCheck();
 
         Check(BandOf(100) == 0, "100 Hz -> graves");
         Check(BandOf(1000) == 1, "1 kHz -> medios");
@@ -165,6 +166,29 @@ public static class SelfCheck
         for (int i = 0; i < 10; i++) a.Update(1 / 60f);
         var r = a.Bands.Raw;
         return Array.IndexOf(r, r.Max());
+    }
+
+    static void NetAudioCheck()
+    {
+        var pk = new byte[2048];
+        int len = NetAudio.Encode(pk, "abc123", 44100, [0f, 0.5f, -1f, 2f]);
+        var o = new float[NetAudio.MaxSamples];
+        Check(NetAudio.Decode(pk.AsSpan(0, len), "abc123", o, out int rate) == 4 && rate == 44100, "audio red: decodifica");
+        Check(MathF.Abs(o[1] - 0.5f) < 1e-3f && o[2] < -0.99f && o[3] > 0.99f, "audio red: valores");
+        Check(NetAudio.Decode(pk.AsSpan(0, len), "abc124", o, out _) == -1, "audio red: código equivocado");
+        Check(NetAudio.Decode(pk.AsSpan(0, 5), "abc123", o, out _) == -1, "audio red: paquete corto");
+        Check(NetAudio.ParseUrl("http://192.168.1.5:8765/?k=ff00") == ("192.168.1.5", 8765, "ff00"), "audio red: url");
+        Check(NetAudio.ParseUrl("192.168.1.5") == null && NetAudio.ParseUrl("http://x:1/") == null, "audio red: url mala");
+
+        // end to end over loopback: sender's packets reach the analyzer
+        var an = new AudioAnalyzer();
+        int port = 40000 + Random.Shared.Next(20000);
+        using var rx = new NetAudioReceiver(port, "tok", an);
+        using var tx = new NetAudioSender($"http://127.0.0.1:{port}/?k=tok");
+        using (var bad = new NetAudioSender($"http://127.0.0.1:{port}/?k=nop")) bad.Push(new float[2000], 48000);
+        tx.Push(new float[2000], 96000); // 96 kHz -> averaged to 48 kHz: 1000 samples = 1 full packet
+        for (int i = 0; i < 100 && rx.Packets == 0; i++) Thread.Sleep(10);
+        Check(rx.Packets == 1 && an.SampleRate == 48000, $"audio red: llegó {rx.Packets} paquete(s) a {an.SampleRate} Hz");
     }
 
     static void Check(bool ok, string what) { if (!ok) throw new Exception("FALLO: " + what); }

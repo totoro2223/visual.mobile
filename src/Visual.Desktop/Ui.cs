@@ -54,6 +54,33 @@ sealed partial class App
             ImGui.ProgressBar(Math.Clamp(v, 0, 1), new Vector2(-1, 0), $"{BandNames[b]} {v:0.00}");
         }
         if (capture.Error != null) Colored(Red, capture.Error);
+
+        ImGui.SeparatorText("Enviar audio a la app del TV");
+        bool net = settings.NetAudioEnabled;
+        string url = settings.NetAudioUrl;
+        if (ImGui.InputTextWithHint("Dirección del TV", "http://192.168.x.x:8765/?k=…", ref url, 200))
+        {
+            settings.NetAudioUrl = url;
+            if (net) SetNetAudio(true);
+        }
+        if (ImGui.Checkbox("Enviar", ref net)) SetNetAudio(net);
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("En el TV elegí la fuente \"Desde la PC (red)\". La dirección es la que aparece debajo del QR.");
+        if (netError != null) Colored(Red, netError);
+        else if (capture.Net is { } s) ImGui.TextDisabled(s.Error ?? $"Enviando a {s.Target}");
+    }
+
+    string? netError;
+
+    void SetNetAudio(bool on)
+    {
+        settings.NetAudioEnabled = on;
+        var old = capture.Net;
+        capture.Net = null;
+        old?.Dispose();
+        netError = null;
+        if (!on) return;
+        try { capture.Net = new NetAudioSender(settings.NetAudioUrl); }
+        catch (Exception e) { netError = e.Message; }
     }
 
     void ProjectPanel()
@@ -421,6 +448,7 @@ sealed partial class App
             if (ImGui.InputInt("Alto (px)", ref vh)) settings.ViewH = Math.Max(1, vh);
             ImGui.TextDisabled($"Ventana: {fb.X} x {fb.Y}. Lo que no entra se recorta.");
         }
+        OutputSettings();
         RemoteSettings();
         ImGui.Separator();
         ImGui.TextDisabled("Proyectos en:");

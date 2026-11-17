@@ -62,6 +62,10 @@ sealed class Settings
     public bool RemoteEnabled { get; set; }
     public int RemotePort { get; set; } = 8765;
     public string? RemoteToken { get; set; }
+    public bool NetAudioEnabled { get; set; }
+    public string NetAudioUrl { get; set; } = "";
+    public int OutputMonitor { get; set; }
+    public bool SeparateOutput { get; set; }
 
     public static Settings Load()
     {

@@ -53,7 +53,6 @@ sealed class Engine : Java.Lang.Object, GLSurfaceView.IRenderer
 
     public Engine(string files, Android.Content.Context ctx)
     {
-        audio = new AudioInput(ctx, Analyzer);
         shaderFolder = Path.Combine(files, "shaders");
         settingsPath = Path.Combine(files, "settings.json");
         store = new ProjectStore(Path.Combine(files, "projects"));
@@ -61,6 +60,7 @@ sealed class Engine : Java.Lang.Object, GLSurfaceView.IRenderer
         catch { settings = new(); }
         settings.RemoteToken ??= RandomNumberGenerator.GetHexString(10, true);
         remote.Start(settings.RemotePort, settings.RemoteToken);
+        audio = new AudioInput(ctx, Analyzer, remote.Port, remote.Token);
         Url = $"http://{RemoteServer.LocalAddress()}:{remote.Port}/?k={remote.Token}";
         shaderFiles = ShaderFiles();
         OpenProject(settings.LastProject);
@@ -95,7 +95,7 @@ sealed class Engine : Java.Lang.Object, GLSurfaceView.IRenderer
             double left = 1.0 / settings.Fps - (Stopwatch.GetTimestamp() - now) / (double)Stopwatch.Frequency - 0.002;
             if (left > 0) Thread.Sleep(TimeSpan.FromSeconds(left));
         }
-        Status = string.Join("\n", new[] { prog?.Error, prog?.Warning, AudioError, audio.Error, notice }.Where(s => !string.IsNullOrEmpty(s)));
+        Status = string.Join("\n", new[] { prog?.Error, prog?.Warning, AudioError, audio.Error, audio.Waiting, notice }.Where(s => !string.IsNullOrEmpty(s)));
     }
 
     void RemoteFrame(float dt)

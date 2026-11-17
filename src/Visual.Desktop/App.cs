@@ -50,6 +50,8 @@ sealed partial class App : IDisposable
         shaderFiles = ShaderFiles();
         OpenProject(settings.LastProject);
         if (settings.RemoteEnabled) StartRemote();
+        if (settings.NetAudioEnabled) SetNetAudio(true);
+        if (settings.SeparateOutput) OpenOutput();
     }
 
     public void Frame(float dt)
@@ -67,7 +69,16 @@ sealed partial class App : IDisposable
             w = Math.Clamp(settings.ViewW, 1, fb.X - x);
             h = Math.Clamp(settings.ViewH, 1, fb.Y - y);
         }
-        renderer.Render(player, analyzer, dt, x, y, w, h, fb.X, fb.Y, settings.AllowFastStrobe);
+        var outSize = OutputSize();
+        if (outSize is var (ow, oh) && fb.X > 0 && fb.Y > 0)
+        {
+            // drawn at the output's resolution; this window shows a letterboxed preview
+            float s = Math.Min(fb.X / (float)ow, fb.Y / (float)oh);
+            (w, h) = (Math.Max(1, (int)(ow * s)), Math.Max(1, (int)(oh * s)));
+            (x, y) = ((fb.X - w) / 2, (fb.Y - h) / 2);
+        }
+        renderer.Render(player, analyzer, dt, x, y, w, h, fb.X, fb.Y, settings.AllowFastStrobe, outSize?.W ?? 0, outSize?.H ?? 0);
+        DrawOutput();
         if (!showUi) return;
         imgui.Update(dt);
         DrawUi();
@@ -82,10 +93,10 @@ sealed partial class App : IDisposable
         if (key is Key.N or Key.Right) player.Next();
     }
 
-    void ToggleFullscreen()
+    void ToggleFullscreen(IMonitor? target = null)
     {
         // borderless window on the current monitor: works for a projector / second screen without a mode switch
-        if (!fullscreen && window.Monitor is { } m)
+        if (!fullscreen && (target ?? window.Monitor) is { } m)
         {
             savedPos = window.Position;
             savedSize = window.Size;
@@ -189,6 +200,8 @@ sealed partial class App : IDisposable
         settings.Save();
         remote.Dispose();
         capture.Dispose();
+        capture.Net?.Dispose();
+        CloseOutput();
         renderer.Dispose();
         imgui.Dispose();
         input.Dispose();

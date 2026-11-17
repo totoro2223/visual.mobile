@@ -9,16 +9,18 @@ namespace VisualApp;
 /// Where the music comes from: what the device itself plays (output mix), its microphone,
 /// or an input device such as a USB audio interface or a wired headset.
 /// </summary>
-sealed class AudioInput(Context ctx, AudioAnalyzer analyzer)
+sealed class AudioInput(Context ctx, AudioAnalyzer analyzer, int netPort, string netToken)
 {
-    public const string SystemId = "system", MicId = "mic";
+    public const string SystemId = "system", MicId = "mic", NetId = "net";
     const int Rate = 44100;
     readonly object gate = new();
     Visualizer? viz;
+    NetAudioReceiver? net;
     volatile AudioRecord? rec;
     Thread? thread;
     public volatile string Active = "";
     public volatile string? Error;
+    public string? Waiting => net is { Packets: 0 } ? "Esperando audio de la PC (en la PC: Audio → Enviar audio a la app del TV)" : null;
 
 #pragma warning disable CA1416 // UsbHeadset is a plain constant; on Android < 8 it simply never matches
     AudioDeviceInfo[] Inputs() =>
@@ -34,6 +36,7 @@ sealed class AudioInput(Context ctx, AudioAnalyzer analyzer)
     [
         (SystemId, "Salida del sistema (lo que suena)"),
         (MicId, "Micrófono"),
+        (NetId, "Desde la PC (red Wi-Fi)"),
         .. Inputs().Select(d => (Id(d), $"{d.ProductName} ({(d.Type.ToString().StartsWith("Usb") ? "USB" : d.Type.ToString())})")),
     ];
 
@@ -64,6 +67,11 @@ sealed class AudioInput(Context ctx, AudioAnalyzer analyzer)
             viz.SetEnabled(true);
             return;
         }
+        if (id == NetId)
+        {
+            net = new NetAudioReceiver(netPort, netToken, analyzer); // UDP on the remote's port, same code as the QR
+            return;
+        }
         AudioDeviceInfo? dev = null;
         if (id != MicId) dev = Inputs().FirstOrDefault(d => Id(d) == id) ?? throw new InvalidOperationException("no está conectado");
         int min = AudioRecord.GetMinBufferSize(Rate, ChannelIn.Mono, Encoding.PcmFloat);
@@ -90,6 +98,8 @@ sealed class AudioInput(Context ctx, AudioAnalyzer analyzer)
     void StopLocked()
     {
         if (viz != null) { try { viz.SetEnabled(false); } catch { } viz.Release(); viz = null; }
+        net?.Dispose();
+        net = null;
         var r = rec;
         rec = null;
         if (r == null) return;

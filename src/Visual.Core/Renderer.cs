@@ -49,6 +49,9 @@ public sealed unsafe class Renderer : IDisposable
     public bool StrobeHeld;
     /// <summary>Internal resolution as a fraction of the output (slow GPUs): draws smaller, stretched on screen.</summary>
     public float Scale = 1;
+    /// <summary>The last finished frame (a texture, shareable with another GL context) and its size.</summary>
+    public uint OutputTexture => pong.Tex;
+    public (int W, int H) OutputSize => (w, h);
     /// <summary>Some strobe is running (scene, auto burst or remote hold); for the on-screen indicator.</summary>
     public bool StrobeActive { get; private set; }
 
@@ -94,7 +97,9 @@ public sealed unsafe class Renderer : IDisposable
     }
 
     /// <summary>Draws into the rectangle (x, y from the top-left, width x height) of a screen of screenW x screenH; the rest is black.</summary>
-    public void Render(Player player, AudioAnalyzer audio, float dt, int x, int y, int width, int height, int screenW, int screenH, bool allowFastStrobe)
+    /// <param name="renderW">internal size when it isn't the on-screen size (a separate output window); 0 = width * Scale</param>
+    public void Render(Player player, AudioAnalyzer audio, float dt, int x, int y, int width, int height, int screenW, int screenH, bool allowFastStrobe,
+        int renderW = 0, int renderH = 0)
     {
         if (width <= 0 || height <= 0) return; // minimized
         Time += dt;
@@ -107,7 +112,7 @@ public sealed unsafe class Renderer : IDisposable
         gl.Disable(EnableCap.ScissorTest);
         gl.Disable(EnableCap.DepthTest);
         gl.Disable(EnableCap.CullFace);
-        EnsureSize(Math.Max(1, (int)(width * Scale)), Math.Max(1, (int)(height * Scale)));
+        EnsureSize(renderW > 0 ? renderW : Math.Max(1, (int)(width * Scale)), renderH > 0 ? renderH : Math.Max(1, (int)(height * Scale)));
         gl.BindVertexArray(vao);
         gl.Viewport(0, 0, (uint)w, (uint)h);
         Upload(waveTex, audio.Wave);

@@ -79,7 +79,11 @@ sealed class AudioCapture(AudioAnalyzer analyzer) : IDisposable
             mono[i] = sum / ch;
         }
         analyzer.Push(mono.AsSpan(0, frames));
+        Net?.Push(mono.AsSpan(0, frames), f.SampleRate);
     }
+
+    /// <summary>When set, everything captured is also sent to the TV app over Wi-Fi.</summary>
+    public volatile NetAudioSender? Net;
 
     void Stop()
     {
