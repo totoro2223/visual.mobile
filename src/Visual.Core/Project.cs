@@ -6,15 +6,55 @@ namespace Visual.Core;
 public sealed class Scene
 {
     public string Shader { get; set; } = "";   // file name inside the shader folder (portable between PC and TV)
+    /// <summary>Optional name to tell scenes apart (the same shader used several times); empty = the shader's.</summary>
+    public string Name { get; set; } = "";
     public float Duration { get; set; } = 20;  // seconds, 0 = manual
+    /// <summary>For the Auto DJ: 0 = automatic (from Motion), 1 soft, 2 medium, 3 strong.</summary>
+    public int Intensity { get; set; }
+    /// <summary>How much the picture moves, measured while it plays (0..1); -1 = not measured yet.</summary>
+    public float Motion { get; set; } = -1;
+    /// <summary>Video / picture for each ISF image input, by input name.</summary>
+    public Dictionary<string, SceneMedia> Media { get; set; } = [];
     public Dictionary<string, ParamState> Params { get; set; } = [];
     public Dictionary<string, ParamState> Effects { get; set; } = [];
+    /// <summary>Own canvas for this scene; null = the device's (global) one.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public SceneCanvas? Canvas { get; set; }
+
+    [JsonIgnore] public string Title => Name.Trim() != "" ? Name.Trim() : Shader;
+
+    // ponytail: motion thresholds guessed (mean color change per 1/4 s on a 32x18 thumbnail); retune with real shaders
+    public const float SoftMotion = 0.03f, StrongMotion = 0.08f;
+    public static readonly string[] LevelNames = ["Auto", "Suave", "Media", "Fuerte"];
+
+    /// <summary>1 soft, 2 medium, 3 strong: the chosen one, else from the measured motion (medium until measured).</summary>
+    [JsonIgnore] public int Level => Intensity is >= 1 and <= 3 ? Intensity : MeasuredLevel;
+    [JsonIgnore] public int MeasuredLevel => Motion < 0 ? 2 : Motion < SoftMotion ? 1 : Motion < StrongMotion ? 2 : 3;
 
     public void EnsureEffects()
     {
         foreach (var d in EffectDefs.All)
             if (!Effects.TryGetValue(d.Name, out var ps) || ps.Value.Length == 0) Effects[d.Name] = new ParamState { Value = [d.Default] };
     }
+}
+
+/// <summary>Canvas: Mode "full", an aspect ratio, or "px" with X, Y, W, H in pixels of the output (see Renderer.Fit).</summary>
+public sealed class SceneCanvas
+{
+    public static readonly string[] Modes = ["full", "16:9", "4:3", "1:1", "px"];
+    public string Mode { get; set; } = "full";
+    public int X { get; set; }
+    public int Y { get; set; }
+    public int W { get; set; } = 1280;
+    public int H { get; set; } = 720;
+}
+
+/// <summary>What plays in an image input: a file of the device's media folder or an http(s) URL; looped and muted.</summary>
+public sealed class SceneMedia
+{
+    public const float MinSpeed = 0.1f, MaxSpeed = 4f;
+    public string Src { get; set; } = "";
+    public float Speed { get; set; } = 1;
 }
 
 public sealed class Project
@@ -28,6 +68,7 @@ public sealed class Project
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public Dictionary<string, ParamState>? Effects { get; set; }
     public AutoStrobe AutoStrobe { get; set; } = new();
+    public AutoDj AutoDj { get; set; } = new();
 
     public void EnsureEffects()
     {
@@ -62,6 +103,33 @@ public sealed class ProjectStore(string folder)
     public Project Load(string name) => JsonSerializer.Deserialize<Project>(File.ReadAllText(PathOf(name)), Json)!;
     public void Delete(string name) => File.Delete(PathOf(name));
     public Project Clone(Project p) => JsonSerializer.Deserialize<Project>(JsonSerializer.Serialize(p, Json), Json)!;
+    public static string ToJson(Project p) => JsonSerializer.Serialize(p, Json);
+
+    /// <summary>A project file from outside (download / upload); throws with a readable message if it isn't one.</summary>
+    public static Project Parse(string json)
+    {
+        Project? p;
+        try { p = JsonSerializer.Deserialize<Project>(json, Json); }
+        catch (Exception e) when (e is JsonException or NotSupportedException or InvalidOperationException) { throw new InvalidDataException("No es un proyecto válido: " + e.Message); }
+        if (p?.Scenes == null || p.AutoStrobe == null || p.Name == null
+            || p.Scenes.Any(s => s?.Shader == null || s.Name == null || s.Media == null || s.Params == null || s.Effects == null
+                                 || s.Params.Values.Concat(s.Effects.Values).Any(ps => ps?.Value == null || ps.Mod == null)))
+            throw new InvalidDataException("No es un proyecto válido");
+        p.AutoDj ??= new();
+        p.EnsureEffects();
+        return p;
+    }
+
+    /// <summary>Saves an outside project under a free name ("Nombre 2" if taken) and returns it.</summary>
+    public Project Import(string json)
+    {
+        var p = Parse(json);
+        var name = p.Name.Trim() is { Length: > 0 } n ? (n.Length > 60 ? n[..60] : n) : "Importado";
+        p.Name = name;
+        for (int i = 2; Exists(p.Name); i++) p.Name = $"{name} {i}";
+        Save(p);
+        return p;
+    }
 
     public void Save(Project p)
     {
@@ -83,6 +151,8 @@ public sealed class Player
     public double SceneTime { get; private set; }
     public double PrevTime { get; private set; }
     public float Fade { get; private set; } = 1;   // 0 = only Previous visible, 1 = only Current
+    /// <summary>The Auto DJ is changing scenes with the music: the scenes' durations wait.</summary>
+    public bool AutoDriving { get; set; }
 
     int Count => Project.Scenes.Count;
 
@@ -106,7 +176,7 @@ public sealed class Player
             Fade = Project.CrossfadeSeconds > 0 ? Math.Min(1, Fade + (float)(dt / Project.CrossfadeSeconds)) : 1;
             if (Fade >= 1) Previous = -1;
         }
-        if (Current >= 0 && Project.Scenes[Current].Duration is > 0 and var d && SceneTime >= d) Next();
+        if (!AutoDriving && Current >= 0 && Project.Scenes[Current].Duration is > 0 and var d && SceneTime >= d) Next();
     }
 
     public void Next() => GoTo(PickNext());

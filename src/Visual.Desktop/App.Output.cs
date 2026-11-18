@@ -100,8 +100,13 @@ sealed partial class App
         outGl.FramebufferTexture2D(FramebufferTarget.ReadFramebuffer, FramebufferAttachment.ColorAttachment0, TextureTarget.Texture2D, renderer.OutputTexture, 0);
         outGl.BindFramebuffer(FramebufferTarget.DrawFramebuffer, 0);
         outGl.Viewport(0, 0, (uint)fb.X, (uint)fb.Y);
-        outGl.BlitFramebuffer(0, 0, w, h, 0, 0, fb.X, fb.Y, ClearBufferMask.ColorBufferBit,
-            w == fb.X && h == fb.Y ? BlitFramebufferFilter.Nearest : BlitFramebufferFilter.Linear);
+        outGl.ClearColor(0, 0, 0, 1);
+        outGl.Clear(ClearBufferMask.ColorBufferBit);
+        var p = renderer.Placed; // the scene's own canvas, if any
+        int bx = (int)MathF.Round(p.X * fb.X), bw = Math.Max(1, (int)MathF.Round(p.W * fb.X)), bh = Math.Max(1, (int)MathF.Round(p.H * fb.Y));
+        int by = fb.Y - (int)MathF.Round(p.Y * fb.Y) - bh; // GL counts from the bottom
+        outGl.BlitFramebuffer(0, 0, w, h, bx, by, bx + bw, by + bh, ClearBufferMask.ColorBufferBit,
+            w == bw && h == bh ? BlitFramebufferFilter.Nearest : BlitFramebufferFilter.Linear);
         outGl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
         outWin.GLContext.SwapBuffers();
         window.GLContext!.MakeCurrent();
@@ -109,7 +114,6 @@ sealed partial class App
 
     void OutputSettings()
     {
-        ImGui.SeparatorText("Pantalla de salida");
         var mons = Monitors();
         var names = mons.Select(MonitorName).ToArray();
         int cur = Math.Clamp(settings.OutputMonitor, 0, Math.Max(0, mons.Length - 1));

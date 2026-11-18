@@ -1,4 +1,4 @@
-﻿using Silk.NET.OpenGL;
+using Silk.NET.OpenGL;
 using Visual.Core;
 
 namespace Visual.Core;
@@ -7,7 +7,7 @@ public sealed class ShaderProgram
 {
     public IsfShader Isf = new();
     public uint Id;
-    public string? Error, Warning;
+    public string? Error;
     readonly Dictionary<string, int> locs = [];
 
     public int Loc(GL gl, string name)
@@ -29,9 +29,9 @@ public sealed unsafe class Renderer : IDisposable
 
     readonly string Version;
     string VertexSrc => Version + """
-        attribute vec2 pos;
+        attribute vec2 isf_Position;
         varying vec2 isf_FragNormCoord;
-        void main() { isf_FragNormCoord = pos * 0.5 + 0.5; gl_Position = vec4(pos, 0.0, 1.0); }
+        void main() { isf_FragNormCoord = isf_Position * 0.5 + 0.5; gl_Position = vec4(isf_Position, 0.0, 1.0); }
         """;
 
     readonly GL gl;
@@ -41,8 +41,12 @@ public sealed unsafe class Renderer : IDisposable
     Target sceneA, sceneB, ping, pong;
     int w, h, frameIndex;
     double strobePhase;
+    bool strobeWasOn;
+    float randomHue;
     readonly AutoStrobeRunner autoStrobe = new();
     public AutoStrobeRunner AutoStrobe => autoStrobe;
+    readonly AutoDjRunner autoDj = new();
+    public AutoDjRunner AutoDj => autoDj;
 
     public double Time { get; private set; }
     public string ShaderFolder = "";
@@ -82,9 +86,8 @@ public sealed unsafe class Renderer : IDisposable
         p = new ShaderProgram();
         try
         {
-            p.Isf = IsfShader.Parse(File.ReadAllText(Path.Combine(ShaderFolder, file)));
-            if (p.Isf.PassCount > 1) p.Warning = $"Tiene {p.Isf.PassCount} pases; por ahora solo se dibuja el primero.";
-            p.Id = Compile(p.Isf.BuildFragment(Version));
+            p.Isf = IsfShader.Load(ShaderFolder, file);
+            p.Id = Compile(p.Isf.BuildFragment(Version), p.Isf.BuildVertex(Version));
         }
         catch (Exception e) { p.Error = e.Message.Trim(); }
         return cache[file] = p;
@@ -94,12 +97,87 @@ public sealed unsafe class Renderer : IDisposable
     {
         foreach (var p in cache.Values) if (p.Id != 0) gl.DeleteProgram(p.Id);
         cache.Clear();
+        foreach (var b in buffers.Values) b.Free(gl);
+        buffers.Clear();
     }
 
-    /// <summary>Draws into the rectangle (x, y from the top-left, width x height) of a screen of screenW x screenH; the rest is black.</summary>
+    /// <summary>A scene's pass buffers: two textures each (read the last frame's, write the other, then swap).</summary>
+    sealed class PassBuffers(ShaderProgram owner, int w, int h)
+    {
+        public readonly ShaderProgram Owner = owner;
+        public readonly int W = w, H = h;
+        public readonly Dictionary<string, (Target Front, Target Back)> Of = [];
+        public int Used;
+
+        public void Free(GL gl)
+        {
+            foreach (var (a, b) in Of.Values)
+                foreach (var t in new[] { a, b }) { gl.DeleteFramebuffer(t.Fbo); gl.DeleteTexture(t.Tex); }
+        }
+    }
+    readonly Dictionary<Scene, PassBuffers> buffers = [];
+
+    PassBuffers BuffersFor(Scene scene, ShaderProgram p)
+    {
+        if (buffers.TryGetValue(scene, out var b) && b.Owner == p && b.W == w && b.H == h) return b;
+        b?.Free(gl); // another shader or size: start over (black)
+        b = new PassBuffers(p, w, h);
+        foreach (var n in p.Isf.Buffers) b.Of[n] = (MakeTarget(false), MakeTarget(false));
+        return buffers[scene] = b;
+    }
+
+    /// <summary>
+    /// Canvas rectangle on a screen of sw x sh: "full", an aspect ratio such as "16:9" (largest centered fit),
+    /// or "px" (x, y, w, h in pixels from the top-left, clipped to the screen).
+    /// </summary>
+    public static (int X, int Y, int W, int H) Fit(string mode, int x, int y, int w, int h, int sw, int sh)
+    {
+        if (sw <= 0 || sh <= 0) return (0, 0, sw, sh);
+        if (mode == "px")
+        {
+            x = Math.Clamp(x, 0, sw - 1);
+            y = Math.Clamp(y, 0, sh - 1);
+            return (x, y, Math.Clamp(w, 1, sw - x), Math.Clamp(h, 1, sh - y));
+        }
+        var p = mode.Split(':');
+        if (p.Length == 2 && float.TryParse(p[0], System.Globalization.CultureInfo.InvariantCulture, out var a)
+            && float.TryParse(p[1], System.Globalization.CultureInfo.InvariantCulture, out var b) && a > 0 && b > 0)
+        {
+            float s = Math.Min(sw / a, sh / b);
+            int fw = Math.Clamp((int)Math.Round(a * s), 1, sw), fh = Math.Clamp((int)Math.Round(b * s), 1, sh);
+            return ((sw - fw) / 2, (sh - fh) / 2, fw, fh);
+        }
+        return (0, 0, sw, sh);
+    }
+
+    /// <summary>Where the last frame went, as fractions of the area given to Render (the output window copies it there too).</summary>
+    public (float X, float Y, float W, float H) Placed { get; private set; } = (0, 0, 1, 1);
+
+    /// <summary>
+    /// Canvas of the playing scene as fractions of an area refW x refH: its own canvas, or <paramref name="global"/> if it has none.
+    /// During a crossfade the shown rectangle slides from the old scene's to the new one's.
+    /// </summary>
+    public static ((float X, float Y, float W, float H) Cur, (float X, float Y, float W, float H) Shown) Place(
+        Player pl, (float X, float Y, float W, float H) global, int refW, int refH)
+    {
+        var sc = pl.Project.Scenes;
+        (float X, float Y, float W, float H) Of(int i)
+        {
+            if (i < 0 || i >= sc.Count || sc[i].Canvas is not { } c || refW <= 0 || refH <= 0) return global;
+            var (x, y, w, h) = Fit(c.Mode, c.X, c.Y, c.W, c.H, refW, refH);
+            return (x / (float)refW, y / (float)refH, w / (float)refW, h / (float)refH);
+        }
+        var cur = Of(pl.Current);
+        if (pl.Previous < 0) return (cur, cur);
+        var (a, t) = (Of(pl.Previous), pl.Fade);
+        return (cur, (a.X + (cur.X - a.X) * t, a.Y + (cur.Y - a.Y) * t, a.W + (cur.W - a.W) * t, a.H + (cur.H - a.H) * t));
+    }
+
+    /// <summary>Draws into the area (x, y from the top-left, width x height) of a screen of screenW x screenH; the rest is black.</summary>
     /// <param name="renderW">internal size when it isn't the on-screen size (a separate output window); 0 = width * Scale</param>
+    /// <param name="global">canvas in pixels of the area for scenes without their own; null = the whole area</param>
     public void Render(Player player, AudioAnalyzer audio, float dt, int x, int y, int width, int height, int screenW, int screenH, bool allowFastStrobe,
-        int renderW = 0, int renderH = 0)
+        int renderW = 0, int renderH = 0, (int X, int Y, int W, int H)? global = null)
     {
         if (width <= 0 || height <= 0) return; // minimized
         Time += dt;
@@ -107,12 +185,17 @@ public sealed unsafe class Renderer : IDisposable
         player.Project.EnsureEffects();
         bool sceneStrobe = Fx(player, audio, "strobeRate") > 0;
         if (autoStrobe.Update(player.Project.AutoStrobe, audio.Bands, dt, maxHz, blocked: sceneStrobe) && player.Project.AutoStrobe.NextScene) player.Next();
+        autoDj.Update(player.Project.AutoDj, player, audio.Music, dt);
         StrobeActive = sceneStrobe || autoStrobe.Active || StrobeHeld;
         gl.Disable(EnableCap.Blend);
         gl.Disable(EnableCap.ScissorTest);
         gl.Disable(EnableCap.DepthTest);
         gl.Disable(EnableCap.CullFace);
-        EnsureSize(renderW > 0 ? renderW : Math.Max(1, (int)(width * Scale)), renderH > 0 ? renderH : Math.Max(1, (int)(height * Scale)));
+        var g = global is { } gr ? (gr.X / (float)width, gr.Y / (float)height, gr.W / (float)width, gr.H / (float)height) : (0f, 0f, 1f, 1f);
+        var (cur, f) = Place(player, g, renderW > 0 ? renderW : width, renderH > 0 ? renderH : height);
+        // sized for the new scene's canvas; during a fade the picture stretches a little while the rectangle slides
+        float iw = renderW > 0 ? renderW : width * Scale, ih = renderH > 0 ? renderH : height * Scale;
+        EnsureSize(Math.Max(1, (int)(iw * cur.W)), Math.Max(1, (int)(ih * cur.H)));
         gl.BindVertexArray(vao);
         gl.Viewport(0, 0, (uint)w, (uint)h);
         Upload(waveTex, audio.Wave);
@@ -123,25 +206,86 @@ public sealed unsafe class Renderer : IDisposable
         bool fading = player.Previous >= 0;
         if (fading) DrawScene(scenes[player.Previous], player.PrevTime, dt, sceneB, audio);
         DrawPost(player, audio, dt, fading ? 1 - player.Fade : 0, maxHz);
+        MeasureMotion(player, dt);
 
         gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
         gl.Viewport(0, 0, (uint)screenW, (uint)screenH);
         gl.ClearColor(0, 0, 0, 1);
         gl.Clear(ClearBufferMask.ColorBufferBit);
-        int y0 = screenH - y - height; // GL counts from the bottom
+        int bx = x + (int)MathF.Round(f.X * width), by = y + (int)MathF.Round(f.Y * height);
+        int bw = Math.Max(1, (int)MathF.Round(f.W * width)), bh = Math.Max(1, (int)MathF.Round(f.H * height));
+        int y0 = screenH - by - bh; // GL counts from the bottom
         gl.BindFramebuffer(FramebufferTarget.ReadFramebuffer, ping.Fbo);
         gl.BindFramebuffer(FramebufferTarget.DrawFramebuffer, 0);
-        gl.BlitFramebuffer(0, 0, w, h, x, y0, x + width, y0 + height, ClearBufferMask.ColorBufferBit,
-            w == width && h == height ? BlitFramebufferFilter.Nearest : BlitFramebufferFilter.Linear);
+        gl.BlitFramebuffer(0, 0, w, h, bx, y0, bx + bw, y0 + bh, ClearBufferMask.ColorBufferBit,
+            w == bw && h == bh ? BlitFramebufferFilter.Nearest : BlitFramebufferFilter.Linear);
+        Placed = f;
         gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
         (ping, pong) = (pong, ping);
+        // a video not drawn for half a second (scene ended / removed) is closed; it starts over next time
+        foreach (var (k, s) in media.Where(kv => kv.Value.Used < frameIndex - 30).ToList())
+        {
+            s.Source?.Dispose();
+            media.Remove(k);
+        }
+        foreach (var (k, b) in buffers.Where(kv => kv.Value.Used < frameIndex - 30).ToList())
+        {
+            b.Free(gl);
+            buffers.Remove(k);
+        }
         frameIndex++;
+    }
+
+    /// <summary>Opens a scene's media Src (a file name of the host's media folder or a URL). Unset = image inputs stay black.</summary>
+    public Func<string, IMediaSource?>? OpenMedia;
+
+    sealed class MediaSlot(string src)
+    {
+        public readonly string Src = src;
+        public IMediaSource? Source;
+        public string? Error;
+        public int Used = -1;
+    }
+    readonly Dictionary<(Scene, string), MediaSlot> media = [];
+
+    /// <summary>The scene's video for an input, opened on first use and advanced once per frame.</summary>
+    IMediaSource? MediaFor(Scene scene, string input, float dt)
+    {
+        if (OpenMedia == null || !scene.Media.TryGetValue(input, out var m) || m.Src == "") return null;
+        if (!media.TryGetValue((scene, input), out var slot) || slot.Src != m.Src)
+        {
+            slot?.Source?.Dispose();
+            media[(scene, input)] = slot = new MediaSlot(m.Src);
+            try { slot.Source = OpenMedia(m.Src); }
+            catch (Exception e) { slot.Error = e.Message; }
+        }
+        if (slot.Used != frameIndex)
+        {
+            slot.Used = frameIndex;
+            try { slot.Source?.Update(dt, Math.Clamp(m.Speed, SceneMedia.MinSpeed, SceneMedia.MaxSpeed)); }
+            catch (Exception e) { slot.Error = e.Message; }
+        }
+        return slot.Source;
+    }
+
+    /// <summary>Problem with a scene's video, for the panels; null if fine or not playing.</summary>
+    public string? MediaError(Scene scene, string input) =>
+        media.TryGetValue((scene, input), out var s) ? s.Error ?? s.Source?.Error : null;
+
+    /// <summary>Closes every video (they reopen when drawn): before deleting or replacing a file.</summary>
+    public void ReleaseMedia()
+    {
+        foreach (var s in media.Values) s.Source?.Dispose();
+        media.Clear();
     }
 
     void DrawScene(Scene? scene, double time, float dt, Target target, AudioAnalyzer audio)
     {
-        gl.BindFramebuffer(FramebufferTarget.Framebuffer, target.Fbo);
         var p = scene == null ? null : Get(scene.Shader);
+        // videos first: Android draws its frame into a texture with its own framebuffer
+        var srcs = p == null || scene == null ? Array.Empty<IMediaSource?>() : p.Isf.Inputs.Select(i => i.Type == IsfType.Image ? MediaFor(scene, i.Name, dt) : null).ToArray();
+        gl.BindFramebuffer(FramebufferTarget.Framebuffer, target.Fbo);
+        gl.Viewport(0, 0, (uint)w, (uint)h);
         if (scene == null || p == null || p.Id == 0)
         {
             gl.ClearColor(0, 0, 0, 1);
@@ -149,33 +293,38 @@ public sealed unsafe class Renderer : IDisposable
             return;
         }
         p.Isf.EnsureParams(scene.Params);
+        gl.ActiveTexture(TextureUnit.Texture0);
+        var bufs = p.Isf.Buffers.Count > 0 ? BuffersFor(scene, p) : null; // before binding inputs: creating textures rebinds
+        if (bufs != null) bufs.Used = frameIndex;
         gl.UseProgram(p.Id);
         var now = DateTime.Now;
         gl.Uniform1(p.Loc(gl, "TIME"), (float)time);
         gl.Uniform1(p.Loc(gl, "TIMEDELTA"), dt);
         gl.Uniform2(p.Loc(gl, "RENDERSIZE"), (float)w, (float)h);
         gl.Uniform1(p.Loc(gl, "FRAMEINDEX"), frameIndex);
-        gl.Uniform1(p.Loc(gl, "PASSINDEX"), 0);
         gl.Uniform4(p.Loc(gl, "DATE"), (float)now.Year, (float)now.Month, (float)now.Day, (float)now.TimeOfDay.TotalSeconds);
 
         int unit = 0;
-        foreach (var i in p.Isf.Inputs)
+        for (int k = 0; k < p.Isf.Inputs.Count; k++)
         {
+            var i = p.Isf.Inputs[k];
             int loc = p.Loc(gl, i.Name);
             if (i.IsTexture)
             {
-                // ponytail: image inputs get a black 1x1 texture until image loading exists
-                var (tex, size) = i.Type switch
+                var vid = srcs[k] is { Texture: not 0 } s ? s : null; // no video (or not loaded yet) = black
+                var (tex, sw, sh) = i.Type switch
                 {
-                    IsfType.Audio => (waveTex, audio.Wave.Length),
-                    IsfType.AudioFFT => (fftTex, audio.Spectrum.Length),
-                    _ => (blackTex, 1),
+                    IsfType.Audio => (waveTex, audio.Wave.Length, 1),
+                    IsfType.AudioFFT => (fftTex, audio.Spectrum.Length, 1),
+                    _ when vid != null => (vid.Texture, vid.Width, vid.Height),
+                    _ => (blackTex, 1, 1),
                 };
                 gl.ActiveTexture(TextureUnit.Texture0 + unit);
                 gl.BindTexture(TextureTarget.Texture2D, tex);
                 gl.Uniform1(loc, unit++);
-                gl.Uniform2(p.Loc(gl, $"_{i.Name}_imgSize"), (float)size, 1f);
-                gl.Uniform4(p.Loc(gl, $"_{i.Name}_imgRect"), 0f, 0f, (float)size, 1f);
+                gl.Uniform2(p.Loc(gl, $"_{i.Name}_imgSize"), (float)sw, (float)sh);
+                gl.Uniform4(p.Loc(gl, $"_{i.Name}_imgRect"), 0f, 0f, (float)sw, (float)sh);
+                gl.Uniform1(p.Loc(gl, $"_{i.Name}_flip"), vid?.TopDown == true ? 1 : 0);
                 continue;
             }
             var ps = scene.Params[i.Name];
@@ -190,8 +339,35 @@ public sealed unsafe class Renderer : IDisposable
                 case IsfType.Color: gl.Uniform4(loc, v[0], v[1], v[2], v[3]); break;
             }
         }
-        gl.ActiveTexture(TextureUnit.Texture0);
-        gl.DrawArrays(PrimitiveType.TriangleStrip, 0, 4);
+
+        // passes: each draws into its TARGET buffer (or the scene's output), reading every buffer as last left;
+        // a final pass with a TARGET is also what the scene shows
+        for (int pass = 0; pass < p.Isf.PassCount; pass++)
+        {
+            var tg = p.Isf.Passes[pass];
+            gl.BindFramebuffer(FramebufferTarget.Framebuffer, tg != "" ? bufs!.Of[tg].Back.Fbo : target.Fbo);
+            gl.Uniform1(p.Loc(gl, "PASSINDEX"), pass);
+            int u = unit;
+            if (bufs != null)
+                foreach (var (n, (front, _)) in bufs.Of)
+                {
+                    gl.ActiveTexture(TextureUnit.Texture0 + u);
+                    gl.BindTexture(TextureTarget.Texture2D, front.Tex);
+                    gl.Uniform1(p.Loc(gl, n), u++);
+                    gl.Uniform2(p.Loc(gl, $"_{n}_imgSize"), (float)w, (float)h);
+                    gl.Uniform4(p.Loc(gl, $"_{n}_imgRect"), 0f, 0f, (float)w, (float)h);
+                    gl.Uniform1(p.Loc(gl, $"_{n}_flip"), 0);
+                }
+            gl.ActiveTexture(TextureUnit.Texture0);
+            gl.DrawArrays(PrimitiveType.TriangleStrip, 0, 4);
+            if (tg != "") bufs!.Of[tg] = (bufs.Of[tg].Back, bufs.Of[tg].Front);
+        }
+        if (p.Isf.Passes[^1] is { Length: > 0 } last)
+        {
+            gl.BindFramebuffer(FramebufferTarget.ReadFramebuffer, bufs!.Of[last].Front.Fbo);
+            gl.BindFramebuffer(FramebufferTarget.DrawFramebuffer, target.Fbo);
+            gl.BlitFramebuffer(0, 0, w, h, 0, 0, w, h, ClearBufferMask.ColorBufferBit, BlitFramebufferFilter.Nearest);
+        }
     }
 
     /// <summary>Effect value of the playing scene; during a crossfade it blends from the previous scene's value.</summary>
@@ -235,8 +411,11 @@ public sealed unsafe class Renderer : IDisposable
         bool on = beat
             ? autoStrobe.SinceHit < duty / Math.Min(maxHz, 10f) // one flash per band hit
             : rate > 0 && strobePhase < duty;
+        if (on && !strobeWasOn) randomHue = Random.Shared.NextSingle(); // "Color al azar": new color each flash
+        strobeWasOn = on;
         gl.Uniform1(post.Loc(gl, "strobe"), on ? intensity : 0f);
         gl.Uniform1(post.Loc(gl, "strobeMode"), mode);
+        gl.Uniform1(post.Loc(gl, "strobeHue"), mode > 3.5f ? randomHue : burst ? a.Hue : E("strobeHue"));
         gl.DrawArrays(PrimitiveType.TriangleStrip, 0, 4);
         gl.ActiveTexture(TextureUnit.Texture0);
     }
@@ -261,11 +440,54 @@ public sealed unsafe class Renderer : IDisposable
         pong = MakeTarget(false);
     }
 
-    Target MakeTarget(bool mirror)
+    // ---- how much the playing scene moves (Scene.Motion, the Auto DJ's guess of its intensity) ----
+    const int ProbeW = 32, ProbeH = 18;
+    Target probe;
+    readonly byte[] probeNow = new byte[ProbeW * ProbeH * 4];
+    readonly byte[] probePrev = new byte[ProbeW * ProbeH * 4];
+    double probeDue;
+    Scene? probeScene;
+
+    /// <summary>Every 1/4 s, the scene picture (before effects) on a thumbnail vs the previous one.</summary>
+    // ponytail: ReadPixels waits for the GPU 4 times a second; a pixel buffer object if it shows on the TV
+    void MeasureMotion(Player pl, float dt)
+    {
+        if ((probeDue -= dt) > 0) return;
+        probeDue = 0.25;
+        var sc = pl.Project.Scenes;
+        var s = pl.Previous < 0 && pl.Current >= 0 && pl.Current < sc.Count && pl.SceneTime > 1 ? sc[pl.Current] : null;
+        if (s == null || Get(s.Shader).Id == 0) { probeScene = null; return; }
+        if (probe.Fbo == 0) probe = MakeTarget(false, ProbeW, ProbeH);
+        gl.BindFramebuffer(FramebufferTarget.ReadFramebuffer, sceneA.Fbo);
+        gl.BindFramebuffer(FramebufferTarget.DrawFramebuffer, probe.Fbo);
+        gl.BlitFramebuffer(0, 0, w, h, 0, 0, ProbeW, ProbeH, ClearBufferMask.ColorBufferBit, BlitFramebufferFilter.Linear);
+        gl.BindFramebuffer(FramebufferTarget.ReadFramebuffer, probe.Fbo);
+        gl.PixelStore(PixelStoreParameter.PackAlignment, 1);
+        fixed (byte* p = probeNow) gl.ReadPixels(0, 0, ProbeW, ProbeH, PixelFormat.Rgba, PixelType.UnsignedByte, p);
+        gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
+        if (probeScene == s)
+        {
+            float d = Difference(probeNow, probePrev);
+            s.Motion = s.Motion < 0 ? d : s.Motion + (d - s.Motion) * 0.05f; // settles over ~5 s of playing
+        }
+        probeScene = s;
+        probeNow.CopyTo(probePrev, 0);
+    }
+
+    /// <summary>Mean change of the color channels of two RGBA pictures, 0..1.</summary>
+    public static float Difference(byte[] a, byte[] b)
+    {
+        long sum = 0;
+        for (int i = 0; i < a.Length; i++)
+            if (i % 4 != 3) sum += Math.Abs(a[i] - b[i]);
+        return sum / (255f * a.Length * 3 / 4);
+    }
+
+    Target MakeTarget(bool mirror, int tw = 0, int th = 0)
     {
         uint tex = gl.GenTexture();
         gl.BindTexture(TextureTarget.Texture2D, tex);
-        gl.TexImage2D(TextureTarget.Texture2D, 0, InternalFormat.Rgba8, (uint)w, (uint)h, 0, PixelFormat.Rgba, PixelType.UnsignedByte, (void*)null);
+        gl.TexImage2D(TextureTarget.Texture2D, 0, InternalFormat.Rgba8, (uint)(tw > 0 ? tw : w), (uint)(th > 0 ? th : h), 0, PixelFormat.Rgba, PixelType.UnsignedByte, (void*)null);
         int wrap = (int)(mirror ? TextureWrapMode.MirroredRepeat : TextureWrapMode.ClampToEdge);
         gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
         gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
@@ -298,16 +520,16 @@ public sealed unsafe class Renderer : IDisposable
             gl.TexImage2D(TextureTarget.Texture2D, 0, InternalFormat.R8, (uint)data.Length, 1, 0, PixelFormat.Red, PixelType.UnsignedByte, p);
     }
 
-    uint Compile(string frag)
+    uint Compile(string frag, string? vert = null)
     {
-        uint vs = Shader(ShaderType.VertexShader, VertexSrc), fs = 0;
+        uint vs = Shader(ShaderType.VertexShader, vert ?? VertexSrc), fs = 0;
         try
         {
             fs = Shader(ShaderType.FragmentShader, frag);
             uint p = gl.CreateProgram();
             gl.AttachShader(p, vs);
             gl.AttachShader(p, fs);
-            gl.BindAttribLocation(p, 0, "pos");
+            gl.BindAttribLocation(p, 0, "isf_Position"); // not "pos": shaders have inputs called that
             gl.LinkProgram(p);
             gl.GetProgram(p, ProgramPropertyARB.LinkStatus, out int ok);
             if (ok == 0)
@@ -342,9 +564,10 @@ public sealed unsafe class Renderer : IDisposable
 
     public void Dispose()
     {
-        Reload();
+        ReleaseMedia();
+        Reload(); // also the pass buffers
         gl.DeleteProgram(post.Id);
-        foreach (var t in new[] { sceneA, sceneB, ping, pong })
+        foreach (var t in new[] { sceneA, sceneB, ping, pong, probe })
             if (t.Fbo != 0) { gl.DeleteFramebuffer(t.Fbo); gl.DeleteTexture(t.Tex); }
         gl.DeleteTexture(waveTex);
         gl.DeleteTexture(fftTex);

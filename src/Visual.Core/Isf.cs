@@ -24,12 +24,29 @@ public sealed class IsfShader
 {
     public string Description = "";
     public List<IsfInput> Inputs = [];
-    public int PassCount = 1;
+    /// <summary>Render target of each pass ("" = the scene's output). Always at least one pass.</summary>
+    public List<string> Passes = [""];
+    /// <summary>Named buffers (pass targets, PERSISTENT_BUFFERS): kept between frames, readable as images.</summary>
+    public List<string> Buffers = [];
+    public int PassCount => Passes.Count;
     public string Source = "";
+    /// <summary>Body of the companion .vs vertex shader, if there is one.</summary>
+    public string? VertexSource;
 
-    static readonly Regex Header = new(@"^\s*/\*(.*?)\*/", RegexOptions.Singleline);
+    // the JSON comment may come after other comments (credits): the first /*{ ... }*/ of the file
+    static readonly Regex Header = new(@"/\*\s*(\{.*?\})\s*\*/", RegexOptions.Singleline);
+    static readonly Regex Identifier = new(@"^[A-Za-z_]\w*$");
     static readonly Regex VersionLine = new(@"^\s*#version.*$", RegexOptions.Multiline);
     static readonly Regex Macro = new(@"\b(IMG_PIXEL|IMG_NORM_PIXEL|IMG_THIS_PIXEL|IMG_THIS_NORM_PIXEL|IMG_SIZE)\s*\(");
+
+    /// <summary>folder/file (.fs) plus its .vs next to it, if any.</summary>
+    public static IsfShader Load(string folder, string file)
+    {
+        var s = Parse(File.ReadAllText(Path.Combine(folder, file)));
+        var vs = Path.Combine(folder, Path.ChangeExtension(file, ".vs"));
+        if (File.Exists(vs)) s.VertexSource = File.ReadAllText(vs);
+        return s;
+    }
 
     public static IsfShader Parse(string source)
     {
@@ -40,12 +57,25 @@ public sealed class IsfShader
             new JsonDocumentOptions { AllowTrailingCommas = true, CommentHandling = JsonCommentHandling.Skip });
         var root = doc.RootElement;
         if (root.TryGetProperty("DESCRIPTION", out var d)) s.Description = d.ToString();
-        if (root.TryGetProperty("PASSES", out var p) && p.ValueKind == JsonValueKind.Array)
-            s.PassCount = Math.Max(1, p.GetArrayLength());
         if (root.TryGetProperty("INPUTS", out var inputs) && inputs.ValueKind == JsonValueKind.Array)
             foreach (var e in inputs.EnumerateArray())
                 if (ParseInput(e) is { } i) s.Inputs.Add(i);
+        // ponytail: buffers are always the render size and 8-bit; WIDTH/HEIGHT expressions and FLOAT are ignored
+        if (root.TryGetProperty("PASSES", out var p) && p.ValueKind == JsonValueKind.Array && p.GetArrayLength() > 0)
+            s.Passes = p.EnumerateArray().Select(x => s.Buffer(x.ValueKind == JsonValueKind.Object ? Str(x, "TARGET") : "")).ToList();
+        if (root.TryGetProperty("PERSISTENT_BUFFERS", out var pb)) // ISF v1: a list of names or { name: {...} }
+            foreach (var n in pb.ValueKind == JsonValueKind.Array ? pb.EnumerateArray().Select(x => x.ToString())
+                     : pb.ValueKind == JsonValueKind.Object ? pb.EnumerateObject().Select(x => x.Name) : Enumerable.Empty<string>())
+                s.Buffer(n);
         return s;
+    }
+
+    /// <summary>Registers a buffer name (once) and returns it; "" for no / unusable names (they draw to the output).</summary>
+    string Buffer(string name)
+    {
+        if (!Identifier.IsMatch(name) || Inputs.Any(i => i.Name == name)) return "";
+        if (!Buffers.Contains(name)) Buffers.Add(name);
+        return name;
     }
 
     static IsfInput? ParseInput(JsonElement e)
@@ -118,7 +148,21 @@ public sealed class IsfShader
     }
 
     /// <summary>Full fragment source: <paramref name="header"/> (#version or precision) + ISF uniforms + expanded body.</summary>
-    public string BuildFragment(string header)
+    public string BuildFragment(string header) => Build(header, "", Source);
+
+    /// <summary>Vertex source from the .vs body (it calls isf_vertShaderInit), or null when the shader has none.</summary>
+    public string? BuildVertex(string header) => VertexSource == null ? null : Build(
+        // GLSL ES: a uniform in both stages needs the same precision. The fragment side gets highp float when the GPU has it
+        // (GL_FRAGMENT_PRECISION_HIGH only exists there) and mediump int by default, so say both before any uniform.
+        // ponytail: a GPU without highp in fragments would mismatch; none of the TVs we target lack it
+        header.Contains("precision") ? "precision highp float;\nprecision mediump int;\n" : header, """
+        attribute vec2 isf_Position;
+        void isf_vertShaderInit() { isf_FragNormCoord = isf_Position * 0.5 + 0.5; gl_Position = vec4(isf_Position, 0.0, 1.0); }
+        #define vv_vertShaderInit isf_vertShaderInit
+
+        """, VertexSource);
+
+    string Build(string header, string extra, string body)
     {
         var sb = new StringBuilder(header);
         sb.Append("""
@@ -141,15 +185,22 @@ public sealed class IsfShader
                 IsfType.Long => $"uniform int {i.Name};\n",
                 IsfType.Point2D => $"uniform vec2 {i.Name};\n",
                 IsfType.Color => $"uniform vec4 {i.Name};\n",
-                _ => $"uniform sampler2D {i.Name};\nuniform vec2 _{i.Name}_imgSize;\nuniform vec4 _{i.Name}_imgRect;\nuniform bool _{i.Name}_flip;\n",
+                _ => Image(i.Name),
             });
         }
+        foreach (var b in Buffers) sb.Append(Image(b));
+        sb.Append(extra);
         sb.Append("#line 1\n");
-        sb.Append(ExpandMacros(VersionLine.Replace(Source, "")));
+        sb.Append(ExpandMacros(VersionLine.Replace(body, "")));
         // GLSL is ASCII only: accents in comments/description make drivers fail ("pre-mature EOF")
         for (int k = 0; k < sb.Length; k++) if (sb[k] > 127) sb[k] = ' ';
         return sb.ToString();
     }
+
+    // pictures uploaded top row first set _flip; every IMG_* macro reads through _x_px
+    static string Image(string n) =>
+        $"uniform sampler2D {n};\nuniform vec2 _{n}_imgSize;\nuniform vec4 _{n}_imgRect;\nuniform bool _{n}_flip;\n"
+        + $"vec4 _{n}_px(vec2 p) {{ return texture2D({n}, _{n}_flip ? vec2(p.x, 1.0 - p.y) : p); }}\n";
 
     public static string ExpandMacros(string src)
     {
@@ -175,10 +226,10 @@ public sealed class IsfShader
             var img = a[0];
             sb.Append(name switch
             {
-                "IMG_PIXEL" => $"texture2D({img}, ({a[1]}) / _{img}_imgSize)",
-                "IMG_NORM_PIXEL" => $"texture2D({img}, {a[1]})",
+                "IMG_PIXEL" => $"_{img}_px(({a[1]}) / _{img}_imgSize)",
+                "IMG_NORM_PIXEL" => $"_{img}_px({a[1]})",
                 "IMG_SIZE" => $"_{img}_imgSize",
-                _ => $"texture2D({img}, isf_FragNormCoord)",
+                _ => $"_{img}_px(isf_FragNormCoord)",
             });
             pos = i;
         }

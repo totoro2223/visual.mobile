@@ -27,6 +27,13 @@ public sealed class RemoteServer : IDisposable
     /// <summary>Latest state JSON, published by the render thread.</summary>
     public volatile string State = "{}";
     public readonly ConcurrentQueue<JsonObject> Commands = new();
+    /// <summary>GET /project waits on these; the render thread answers with (name, ProjectStore.ToJson) via AnswerExports.</summary>
+    public readonly ConcurrentQueue<TaskCompletionSource<(string Name, string Json)>> ExportRequests = new();
+
+    public void AnswerExports(Project p)
+    {
+        while (ExportRequests.TryDequeue(out var r)) r.TrySetResult((p.Name, ProjectStore.ToJson(p)));
+    }
 
     public void Start(int port, string token, bool loopbackOnly = false)
     {
@@ -98,10 +105,26 @@ public sealed class RemoteServer : IDisposable
             var head = Encoding.ASCII.GetString(buf, 0, end).Split("\r\n");
             var first = head[0].Split(' ');
             if (first.Length < 2) return;
-            int len = 0;
+            long len = 0;
             foreach (var h in head.Skip(1))
-                if (h.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase)) int.TryParse(h[15..].Trim(), out len);
+                if (h.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase)) long.TryParse(h[15..].Trim(), out len);
             int start = end + 4;
+            var target = first[1];
+            int q = target.IndexOf('?');
+            var path = q < 0 ? target : target[..q];
+            var query = HttpUtility.ParseQueryString(q < 0 ? "" : target[(q + 1)..]);
+            var key = query["k"] ?? "";
+            if (!CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(key), Encoding.UTF8.GetBytes(Token)))
+            {
+                await Reply(s, 403, "text/plain", "bad key"u8.ToArray());
+                return;
+            }
+            if ((first[0], path) == ("POST", "/media")) // big: straight to disk, not into buf
+            {
+                var (code, msg) = await ReceiveMedia(s, query["name"] ?? "", len, buf.AsMemory(start, n - start));
+                await Reply(s, code, "text/plain; charset=utf-8", Encoding.UTF8.GetBytes(msg));
+                return;
+            }
             if (len < 0 || start + len > buf.Length) { await Reply(s, 413, "text/plain", "too large"u8.ToArray()); return; }
             while (n < start + len)
             {
@@ -110,15 +133,6 @@ public sealed class RemoteServer : IDisposable
                 n += r;
             }
 
-            var target = first[1];
-            int q = target.IndexOf('?');
-            var path = q < 0 ? target : target[..q];
-            var key = HttpUtility.ParseQueryString(q < 0 ? "" : target[(q + 1)..])["k"] ?? "";
-            if (!CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(key), Encoding.UTF8.GetBytes(Token)))
-            {
-                await Reply(s, 403, "text/plain", "bad key"u8.ToArray());
-                return;
-            }
             switch (first[0], path)
             {
                 case ("GET", "/"):
@@ -129,11 +143,36 @@ public sealed class RemoteServer : IDisposable
                     break;
                 case ("POST", "/upload"): // body = the .fs text; the host saves it on its own thread
                     var name = HttpUtility.ParseQueryString(target[(q + 1)..])["name"] ?? "";
-                    Commands.Enqueue(new JsonObject { ["op"] = "upload", ["name"] = name, ["text"] = Encoding.UTF8.GetString(buf, start, len) });
+                    Commands.Enqueue(new JsonObject { ["op"] = "upload", ["name"] = name, ["text"] = Encoding.UTF8.GetString(buf, start, (int)len) });
                     await Reply(s, 200, "text/plain", "ok"u8.ToArray());
                     break;
+                case ("GET", "/project"): // the host serializes it on its own thread (ExportRequests)
+                    var req = new TaskCompletionSource<(string Name, string Json)>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    ExportRequests.Enqueue(req);
+                    var (pname, json) = await req.Task.WaitAsync(cts.Token);
+                    await Reply(s, 200, "application/json; charset=utf-8", Encoding.UTF8.GetBytes(json),
+                        "Content-Disposition: attachment; filename*=UTF-8''" + Uri.EscapeDataString(pname + ".json"));
+                    break;
+                case ("POST", "/importProject"): // checked here so the phone gets the error; the host saves and opens it
+                    var text = Encoding.UTF8.GetString(buf, start, (int)len);
+                    try { ProjectStore.Parse(text); }
+                    catch (InvalidDataException e) { await Reply(s, 400, "text/plain; charset=utf-8", Encoding.UTF8.GetBytes(e.Message)); break; }
+                    Commands.Enqueue(new JsonObject { ["op"] = "import", ["text"] = text });
+                    await Reply(s, 200, "text/plain", "ok"u8.ToArray());
+                    break;
+                case ("GET", "/shaderSource"):
+                    try
+                    {
+                        var src = Remote.ShaderPreview(ShaderFolder ?? throw new ArgumentException("Este equipo no muestra shaders"), query["name"] ?? "");
+                        await Reply(s, 200, "application/json; charset=utf-8", Encoding.UTF8.GetBytes(src));
+                    }
+                    catch (Exception e) // bad name, missing file, broken header / macro
+                    {
+                        await Reply(s, 400, "text/plain; charset=utf-8", Encoding.UTF8.GetBytes(e.Message));
+                    }
+                    break;
                 case ("POST", "/cmd"):
-                    if (JsonNode.Parse(buf.AsSpan(start, len)) is JsonObject cmd && Commands.Count < 256) Commands.Enqueue(cmd);
+                    if (JsonNode.Parse(buf.AsSpan(start, (int)len)) is JsonObject cmd && Commands.Count < 256) Commands.Enqueue(cmd);
                     await Reply(s, 200, "text/plain", "ok"u8.ToArray());
                     break;
                 default:
@@ -144,9 +183,56 @@ public sealed class RemoteServer : IDisposable
         catch { } // bad request / client gone: just drop the connection
     }
 
-    static async Task Reply(Stream s, int code, string type, byte[] body)
+    /// <summary>Folder that POST /media writes videos / pictures into; null = uploads refused.</summary>
+    public volatile string? MediaFolder;
+    /// <summary>Folder GET /shaderSource reads from; null = no previews.</summary>
+    public volatile string? ShaderFolder;
+    public const long MaxMediaBytes = 4L << 30;
+
+    /// <summary>Copies the body into MediaFolder/name (via a .part file), then queues {"op":"mediaChanged"} for the host.</summary>
+    async Task<(int, string)> ReceiveMedia(Stream s, string name, long len, ReadOnlyMemory<byte> already)
     {
-        var head = $"HTTP/1.1 {code} {(code == 200 ? "OK" : "Error")}\r\nContent-Type: {type}\r\nContent-Length: {body.Length}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n";
+        var folder = MediaFolder;
+        if (folder == null) return (403, "Este equipo no recibe videos");
+        if (!Media.ValidName(name)) return (400, "Nombre o tipo de archivo no admitido: " + name);
+        if (len <= 0 || len > MaxMediaBytes) return (413, "El archivo tiene que pesar menos de 4 GB");
+        Directory.CreateDirectory(folder);
+        try { if (new DriveInfo(Path.GetFullPath(folder)).AvailableFreeSpace < len + (64 << 20)) return (507, "No hay espacio libre en el equipo"); }
+        catch { } // unknown drive: just try
+        var dest = Path.Combine(folder, name);
+        var part = dest + ".part";
+        try
+        {
+            await using (var f = new FileStream(part, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 16, true))
+            {
+                var take = already[..(int)Math.Min(already.Length, len)];
+                await f.WriteAsync(take);
+                long left = len - take.Length;
+                var chunk = new byte[1 << 16];
+                while (left > 0)
+                {
+                    using var idle = new CancellationTokenSource(30000); // slow Wi-Fi is fine, a dead one is not
+                    int r = await s.ReadAsync(chunk.AsMemory(0, (int)Math.Min(chunk.Length, left)), idle.Token);
+                    if (r == 0) throw new IOException("Se cortó la conexión");
+                    await f.WriteAsync(chunk.AsMemory(0, r));
+                    left -= r;
+                }
+            }
+            File.Move(part, dest, true);
+        }
+        catch (Exception e)
+        {
+            try { File.Delete(part); } catch { }
+            return (500, e is IOException && File.Exists(dest) ? "No se pudo reemplazar (¿se está reproduciendo?): " + e.Message : e.Message);
+        }
+        Commands.Enqueue(new JsonObject { ["op"] = "mediaChanged", ["name"] = name });
+        return (200, "ok");
+    }
+
+    static async Task Reply(Stream s, int code, string type, byte[] body, string? extraHeader = null)
+    {
+        var extra = extraHeader == null ? "" : extraHeader + "\r\n";
+        var head = $"HTTP/1.1 {code} {(code == 200 ? "OK" : "Error")}\r\nContent-Type: {type}\r\nContent-Length: {body.Length}\r\nCache-Control: no-store\r\n{extra}Connection: close\r\n\r\n";
         await s.WriteAsync(Encoding.ASCII.GetBytes(head));
         await s.WriteAsync(body);
     }
@@ -169,7 +255,7 @@ public static class Remote
         Converters = { new JsonStringEnumConverter() },
     };
 
-    public static string State(Player pl, IsfShader? isf, string loaded, string[] projects, string[] shaders, AudioBands bands, float maxHz, bool strobe, object? device = null)
+    public static string State(Player pl, IsfShader? isf, string loaded, string[] projects, string[] shaders, string[] media, AudioAnalyzer audio, float maxHz, bool strobe, object? device = null, AutoDjRunner? dj = null)
     {
         var p = pl.Project;
         var scene = pl.Current >= 0 && pl.Current < p.Scenes.Count ? p.Scenes[pl.Current] : null;
@@ -183,17 +269,25 @@ public static class Remote
             Shaders = shaders,
             pl.Current,
             pl.SceneTime,
-            Scenes = p.Scenes.Select(s => new { s.Shader, s.Duration, Fx = EffectDefs.ActiveLabels(s.Effects) }),
+            Scenes = p.Scenes.Select(s => new { s.Shader, s.Title, s.Duration, s.Intensity, s.Level, Fx = EffectDefs.ActiveLabels(s.Effects) }),
+            Name = scene?.Name,
+            Media = scene?.Media,
+            MediaFiles = media,
             p.Shuffle,
             p.Crossfade,
             p.CrossfadeSeconds,
-            Inputs = (isf?.Inputs ?? []).Where(i => !i.IsTexture)
+            Inputs = (isf?.Inputs ?? []).Where(i => i.Type is not (IsfType.Audio or IsfType.AudioFFT))
                 .Select(i => new { i.Name, i.Label, Type = i.Type.ToString(), i.Min, i.Max, i.Values, i.Labels }),
             Params = scene?.Params,
             EffectDefs = EffectDefs.All,
+            EffectDefs.StrobeModes,
             Effects = scene?.Effects,
+            Canvas = scene?.Canvas,
             p.AutoStrobe,
-            Bands = bands.Raw,
+            Bands = audio.Bands.Raw,
+            Music = new { audio.Music.Energy, audio.Music.Bpm, audio.Music.Confidence, audio.Music.Locked, audio.Music.Silence, audio.Music.BarPhase },
+            p.AutoDj,
+            Dj = dj == null ? null : new { dj.Active, dj.Bar, Status = dj.Status(p.AutoDj, p), dj.LastChange },
             MaxHz = maxHz,
             Strobe = strobe,
             Device = device, // host-only settings (Android: audio source, quality); null on PC
@@ -201,7 +295,7 @@ public static class Remote
     }
 
     /// <summary>Applies a command to the project/player. Returns the op when the host must handle it (strobe, open, save, new, duplicate), else null.</summary>
-    public static string? Apply(JsonObject c, Player pl, string[] shaders)
+    public static string? Apply(JsonObject c, Player pl, string[] shaders, MusicMeter? music = null)
     {
         var p = pl.Project;
         var op = Str(c, "op");
@@ -224,6 +318,33 @@ public static class Remote
             case "copyEffects":
                 if (SceneAt(p, Int(c, "scene")) is { } cs) p.CopyEffects(cs);
                 break;
+            case "canvas": // value null = back to the global canvas
+                if (SceneAt(p, Int(c, "scene")) is { } vs)
+                    vs.Canvas = c["value"].Deserialize<SceneCanvas>(Json) is { } v && SceneCanvas.Modes.Contains(v.Mode)
+                        ? new SceneCanvas { Mode = v.Mode, X = Math.Max(0, v.X), Y = Math.Max(0, v.Y), W = Math.Max(1, v.W), H = Math.Max(1, v.H) }
+                        : null;
+                break;
+            case "name":
+                if (SceneAt(p, Int(c, "scene")) is { } ns) ns.Name = Str(c, "value").Trim() is var t && t.Length > 60 ? t[..60] : t;
+                break;
+            case "media": // value null = nothing in that input
+                if (SceneAt(p, Int(c, "scene")) is { } ms && Str(c, "name") is { Length: > 0 and <= 64 } input)
+                {
+                    if (c["value"].Deserialize<SceneMedia>(Json) is { } sm && (Media.IsUrl(sm.Src) ? sm.Src.Length <= 2000 : Media.ValidName(sm.Src)))
+                        ms.Media[input] = new SceneMedia
+                        {
+                            Src = sm.Src.Trim(),
+                            Speed = float.IsFinite(sm.Speed) ? Math.Clamp(sm.Speed, SceneMedia.MinSpeed, SceneMedia.MaxSpeed) : 1,
+                        };
+                    else if (c["value"] == null) ms.Media.Remove(input);
+                }
+                break;
+            case "intensity":
+                if (SceneAt(p, Int(c, "scene")) is { } ins) ins.Intensity = Math.Clamp(Int(c, "value"), 0, 3);
+                break;
+            case "autodj":
+                if (c["value"].Deserialize<AutoDj>(Json) is { } dj) p.AutoDj = new AutoDj { Enabled = dj.Enabled, Bars = Math.Clamp(dj.Bars, 1, 64), Drops = dj.Drops };
+                break;
             case "autostrobe":
                 if (c["value"].Deserialize<AutoStrobe>(Json) is { } a) p.AutoStrobe = a;
                 break;
@@ -231,6 +352,11 @@ public static class Remote
                 p.Shuffle = c["shuffle"]?.GetValue<bool>() ?? p.Shuffle;
                 p.Crossfade = c["crossfade"]?.GetValue<bool>() ?? p.Crossfade;
                 p.CrossfadeSeconds = Math.Clamp(c["crossfadeSeconds"]?.GetValue<float>() ?? p.CrossfadeSeconds, 0.1f, 10f);
+                break;
+            case "music": // the phone's Tap sends the tempo it measured (Wi-Fi delays would spoil single taps)
+                if (c["bpm"] != null) music?.SetTempo(Float(c, "bpm"), Int(c, "beat"));
+                else if (c["lock"]?.GetValue<bool>() == true) music?.Lock();
+                else music?.Unlock();
                 break;
             case "add":
                 if (shaders.Contains(Str(c, "shader"))) p.Scenes.Add(new Scene { Shader = Str(c, "shader") });
@@ -247,13 +373,35 @@ public static class Remote
         return null;
     }
 
-    /// <summary>Saves an uploaded shader into the folder; only plain "name.fs" file names. Returns the file name.</summary>
+    /// <summary>Only plain "name.fs" (or "name.vs" when <paramref name="vertex"/>) file names.</summary>
+    static void CheckShaderName(string name, bool vertex = false)
+    {
+        if (name != Path.GetFileName(name) || name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || name.StartsWith('.')
+            || !(name.EndsWith(".fs", StringComparison.OrdinalIgnoreCase) || vertex && name.EndsWith(".vs", StringComparison.OrdinalIgnoreCase)))
+            throw new ArgumentException($"Nombre de shader inválido: {name}");
+    }
+
+    /// <summary>GET /shaderSource: the GLSL ES sources the TV compiles (the browser draws them with WebGL), passes and inputs.</summary>
+    public static string ShaderPreview(string folder, string name)
+    {
+        CheckShaderName(name);
+        if (!File.Exists(Path.Combine(folder, name))) throw new ArgumentException("No existe: " + name);
+        var isf = IsfShader.Load(folder, name);
+        return JsonSerializer.Serialize(new
+        {
+            Frag = isf.BuildFragment(Renderer.EsHeader),
+            Vert = isf.BuildVertex(Renderer.EsHeader),
+            isf.Passes,
+            isf.Buffers,
+            Inputs = isf.Inputs.Select(i => new { i.Name, i.Label, Type = i.Type.ToString(), i.Default, i.Min, i.Max, i.Values, i.Labels }),
+        });
+    }
+
+    /// <summary>Saves an uploaded .fs (or its companion .vs) into the folder. Returns the file name.</summary>
     public static string SaveShader(string folder, string name, string text)
     {
-        if (name != Path.GetFileName(name) || !name.EndsWith(".fs", StringComparison.OrdinalIgnoreCase)
-            || name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || name.StartsWith('.'))
-            throw new ArgumentException($"Nombre de shader inválido: {name}");
-        IsfShader.Parse(text); // rejects a broken JSON header before it lands in the folder
+        CheckShaderName(name, vertex: true);
+        if (name.EndsWith(".fs", StringComparison.OrdinalIgnoreCase)) IsfShader.Parse(text); // rejects a broken JSON header before it lands in the folder
         Directory.CreateDirectory(folder);
         File.WriteAllText(Path.Combine(folder, name), text);
         return name;

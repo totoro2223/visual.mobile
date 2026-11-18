@@ -14,6 +14,7 @@ sealed partial class App : IDisposable
     readonly GL gl;
     readonly IInputContext input;
     readonly ImGuiController imgui;
+    ImFontPtr? bold; // null when Segoe UI Bold is missing
     readonly Renderer renderer;
     readonly AudioAnalyzer analyzer = new();
     readonly AudioCapture capture;
@@ -24,6 +25,7 @@ sealed partial class App : IDisposable
     string loadedName = "";
     string[] projectNames = [];
     string[] shaderFiles = [];
+    string[] mediaFiles = [];
     bool showUi = true, fullscreen;
     Vector2D<int> savedPos, savedSize;
 
@@ -33,11 +35,16 @@ sealed partial class App : IDisposable
         this.settings = settings;
         gl = window.CreateOpenGL();
         input = window.CreateInput();
-        var font = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Fonts), "segoeui.ttf");
+        var fonts = Environment.GetFolderPath(Environment.SpecialFolder.Fonts);
+        string font = Path.Combine(fonts, "segoeui.ttf"), boldFile = Path.Combine(fonts, "segoeuib.ttf");
         imgui = File.Exists(font)
-            ? new ImGuiController(gl, window, input, new ImGuiFontConfig(font, 18)) // default font has no accents
+            ? new ImGuiController(gl, window, input, new ImGuiFontConfig(font, 18), () => // default font has no accents
+            {
+                if (File.Exists(boldFile)) bold = ImGui.GetIO().Fonts.AddFontFromFileTTF(boldFile, 18); // effect names
+            })
             : new ImGuiController(gl, window, input);
         renderer = new Renderer(gl, Renderer.DesktopHeader) { ShaderFolder = settings.ShaderFolder };
+        renderer.OpenMedia = src => DesktopMedia.Open(gl, settings.MediaFolder, src);
         capture = new AudioCapture(analyzer);
 
         sources = AudioCapture.List();
@@ -47,7 +54,7 @@ sealed partial class App : IDisposable
         if (src != null) capture.Start(src);
 
         foreach (var kb in input.Keyboards) kb.KeyDown += OnKey;
-        shaderFiles = ShaderFiles();
+        ReloadShaders();
         OpenProject(settings.LastProject);
         if (settings.RemoteEnabled) StartRemote();
         if (settings.NetAudioEnabled) SetNetAudio(true);
@@ -174,6 +181,14 @@ sealed partial class App : IDisposable
         StartNew(copy);
     }
 
+    /// <summary>Saves the current project, then stores the outside one under a free name and opens it.</summary>
+    void ImportProject(string json)
+    {
+        SaveProject(); // first: its name can't be taken by the import
+        OpenProject(store.Import(json).Name); // a bad file throws here and nothing else changes
+        status = $"Proyecto importado: {project.Name}";
+    }
+
     string UniqueName(string baseName)
     {
         var name = baseName;
@@ -190,8 +205,39 @@ sealed partial class App : IDisposable
 
     void ReloadShaders()
     {
+        CopyBundledShaders();
         renderer.Reload();
+        renderer.ReleaseMedia();
         shaderFiles = ShaderFiles();
+        mediaFiles = Media.List(settings.MediaFolder);
+        remote.MediaFolder = settings.MediaFolder;
+        remote.ShaderFolder = settings.ShaderFolder;
+    }
+
+    /// <summary>The shaders built next to the exe go to the chosen shader folder: missing ones, or ones the build has newer.
+    /// A copy the user edited later is newer, so it is kept.</summary>
+    void CopyBundledShaders()
+    {
+        string from = Path.Combine(AppContext.BaseDirectory, "shaders"), to = settings.ShaderFolder;
+        if (!Directory.Exists(from) || Path.GetFullPath(from).TrimEnd('\\').Equals(Path.GetFullPath(to).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase)) return;
+        foreach (var f in Directory.GetFiles(from, "*.fs").Concat(Directory.GetFiles(from, "*.vs")))
+        {
+            var dst = Path.Combine(to, Path.GetFileName(f));
+            try
+            {
+                if (File.Exists(dst) && File.GetLastWriteTimeUtc(dst) >= File.GetLastWriteTimeUtc(f)) continue;
+                Directory.CreateDirectory(to);
+                File.Copy(f, dst, overwrite: true); // keeps the date, so it isn't copied again
+            }
+            catch (IOException) { } // folder missing / file in use: the old copy stays
+            catch (UnauthorizedAccessException) { }
+        }
+    }
+
+    void SetMediaFolder(string folder)
+    {
+        settings.MediaFolder = folder;
+        ReloadShaders();
     }
 
     public void Dispose()

@@ -21,7 +21,8 @@ public sealed class AutoStrobe
     public float Rate { get; set; } = EffectDefs.SafeStrobeHz; // Hz, Linear rhythm; capped like any strobe
     public float Duty { get; set; } = 0.3f;       // fraction of each cycle that is lit
     public float Intensity { get; set; } = 1;
-    public int Mode { get; set; }                 // 0 white, 1 black, 2 invert
+    public int Mode { get; set; }                 // EffectDefs.StrobeModes: 0 white, 1 black, 2 invert, 3 color, 4 random color
+    public float Hue { get; set; }                // mode 3: 0 red, 0.33 green, 0.66 blue
 }
 
 /// <summary>Runtime state of the bursts. Update once per frame.</summary>

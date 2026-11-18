@@ -19,6 +19,15 @@ sealed class AppSettings
     /// <summary>Internal resolution (1 = full); lower for slow GPUs.</summary>
     public float Scale { get; set; } = 1;
     public int Fps { get; set; } = 60;
+    /// <summary>"full", an aspect ratio ("16:9", "4:3", "1:1") or "px" (ViewX..ViewH).</summary>
+    public string Canvas { get; set; } = "full";
+    public int ViewX { get; set; }
+    public int ViewY { get; set; }
+    public int ViewW { get; set; } = 1280;
+    public int ViewH { get; set; } = 720;
+    /// <summary>Lets strobes go past the safe 3 Hz, up to 20 Hz.</summary>
+    public bool AllowFastStrobe { get; set; }
+    public float MaxHz => AllowFastStrobe ? 20f : EffectDefs.SafeStrobeHz;
 }
 
 /// <summary>
@@ -39,7 +48,8 @@ sealed class Engine : Java.Lang.Object, GLSurfaceView.IRenderer
     public string Url { get; }
     public string? RemoteError => remote.Error;
 
-    readonly string shaderFolder, settingsPath;
+    readonly string shaderFolder, mediaFolder, settingsPath;
+    string[] mediaFiles = [];
     readonly ProjectStore store;
     readonly RemoteServer remote = new();
     readonly AppSettings settings;
@@ -54,12 +64,16 @@ sealed class Engine : Java.Lang.Object, GLSurfaceView.IRenderer
     public Engine(string files, Android.Content.Context ctx)
     {
         shaderFolder = Path.Combine(files, "shaders");
+        mediaFolder = Path.Combine(files, "videos");
+        mediaFiles = Media.List(mediaFolder);
         settingsPath = Path.Combine(files, "settings.json");
         store = new ProjectStore(Path.Combine(files, "projects"));
         try { settings = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(settingsPath)) ?? new(); }
         catch { settings = new(); }
         settings.RemoteToken ??= RandomNumberGenerator.GetHexString(10, true);
         remote.Start(settings.RemotePort, settings.RemoteToken);
+        remote.MediaFolder = mediaFolder;
+        remote.ShaderFolder = shaderFolder;
         audio = new AudioInput(ctx, Analyzer, remote.Port, remote.Token);
         Url = $"http://{RemoteServer.LocalAddress()}:{remote.Port}/?k={remote.Token}";
         shaderFiles = ShaderFiles();
@@ -70,7 +84,10 @@ sealed class Engine : Java.Lang.Object, GLSurfaceView.IRenderer
     public void OnSurfaceCreated(IGL10? unused, EGLConfig? config)
     {
         // a new context (first start or after it was lost): old GL objects are gone, build everything again
-        renderer = new Renderer(GL.GetApi(GlLoader.Get), Renderer.EsHeader) { ShaderFolder = shaderFolder };
+        renderer?.ReleaseMedia(); // stops the old players; the new context has no objects yet to clash with
+        var gl = GL.GetApi(GlLoader.Get);
+        renderer = new Renderer(gl, Renderer.EsHeader) { ShaderFolder = shaderFolder };
+        renderer.OpenMedia = src => AndroidMedia.Open(gl, mediaFolder, src);
     }
 
     public void OnSurfaceChanged(IGL10? unused, int w, int h) => (width, height) = (w, h);
@@ -86,16 +103,20 @@ sealed class Engine : Java.Lang.Object, GLSurfaceView.IRenderer
         Player.Update(dt);
         if (renderer == null) return;
         renderer.Scale = Math.Clamp(settings.Scale, 0.25f, 1f);
-        renderer.Render(Player, Analyzer, dt, 0, 0, width, height, width, height, allowFastStrobe: false);
+        // whole screen as the area; the device canvas is the default for scenes without their own
+        renderer.Render(Player, Analyzer, dt, 0, 0, width, height, width, height, allowFastStrobe: settings.AllowFastStrobe,
+            global: Renderer.Fit(settings.Canvas, settings.ViewX, settings.ViewY, settings.ViewW, settings.ViewH, width, height));
 
         var sc = project.Scenes;
-        var prog = Player.Current >= 0 && Player.Current < sc.Count ? renderer.Get(sc[Player.Current].Shader) : null;
+        var cur = Player.Current >= 0 && Player.Current < sc.Count ? sc[Player.Current] : null;
+        var prog = cur == null ? null : renderer.Get(cur.Shader);
+        var mediaErr = cur == null ? "" : string.Join("\n", cur.Media.Keys.Select(k => renderer.MediaError(cur, k)).Where(e => e != null));
         if (settings.Fps < 60) // GLSurfaceView has no frame cap: wait out the rest of the frame on the GL thread
         {
             double left = 1.0 / settings.Fps - (Stopwatch.GetTimestamp() - now) / (double)Stopwatch.Frequency - 0.002;
             if (left > 0) Thread.Sleep(TimeSpan.FromSeconds(left));
         }
-        Status = string.Join("\n", new[] { prog?.Error, prog?.Warning, AudioError, audio.Error, audio.Waiting, notice }.Where(s => !string.IsNullOrEmpty(s)));
+        Status = string.Join("\n", new[] { prog?.Error, mediaErr, AudioError, audio.Error, audio.Waiting, notice }.Where(s => !string.IsNullOrEmpty(s)));
     }
 
     void RemoteFrame(float dt)
@@ -105,7 +126,7 @@ sealed class Engine : Java.Lang.Object, GLSurfaceView.IRenderer
         {
             try
             {
-                switch (Remote.Apply(c, Player, shaderFiles))
+                switch (Remote.Apply(c, Player, shaderFiles, Analyzer.Music))
                 {
                     case "strobe":
                         // re-sent every 0.4 s while held; stops by itself if the phone goes quiet
@@ -129,11 +150,27 @@ sealed class Engine : Java.Lang.Object, GLSurfaceView.IRenderer
                         copy.Name = UniqueName(project.Name + " copia");
                         StartNew(copy);
                         break;
+                    case "import":
+                        SaveProject(); // first: its name can't be taken by the import
+                        OpenProject(store.Import(c["text"]!.GetValue<string>()).Name);
+                        break;
                     case "upload":
                         Remote.SaveShader(shaderFolder, c["name"]!.GetValue<string>(), c["text"]!.GetValue<string>());
                         renderer?.Reload();
                         shaderFiles = ShaderFiles();
                         notice = "";
+                        break;
+                    case "mediaChanged":
+                        renderer?.ReleaseMedia(); // a replaced video reopens
+                        mediaFiles = Media.List(mediaFolder);
+                        break;
+                    case "deleteMedia":
+                        if (c["name"]?.GetValue<string>() is { } dm && Media.ValidName(dm))
+                        {
+                            renderer?.ReleaseMedia();
+                            File.Delete(Path.Combine(mediaFolder, dm));
+                            mediaFiles = Media.List(mediaFolder);
+                        }
                         break;
                     case "device":
                         if (c["source"]?.GetValue<string>() is { } src && src != audio.Active)
@@ -143,19 +180,26 @@ sealed class Engine : Java.Lang.Object, GLSurfaceView.IRenderer
                         }
                         if (c["scale"]?.GetValue<float>() is { } s && float.IsFinite(s)) settings.Scale = Math.Clamp(s, 0.25f, 1f);
                         if (c["fps"]?.GetValue<int>() is { } f) settings.Fps = f >= 60 ? 60 : 30;
+                        if (c["canvas"]?.GetValue<string>() is { } cv && SceneCanvas.Modes.Contains(cv)) settings.Canvas = cv;
+                        if (c["x"]?.GetValue<int>() is { } vx) settings.ViewX = Math.Max(0, vx);
+                        if (c["y"]?.GetValue<int>() is { } vy) settings.ViewY = Math.Max(0, vy);
+                        if (c["w"]?.GetValue<int>() is { } vw) settings.ViewW = Math.Max(1, vw);
+                        if (c["h"]?.GetValue<int>() is { } vh) settings.ViewH = Math.Max(1, vh);
+                        if (c["fastStrobe"]?.GetValue<bool>() is { } fs) settings.AllowFastStrobe = fs;
                         SaveSettings();
                         break;
                 }
             }
             catch (Exception e) { notice = "Control remoto: " + e.Message; }
         }
+        remote.AnswerExports(project);
         if (renderer != null) renderer.StrobeHeld = clock < strobeUntil;
         if (clock < stateDue || renderer == null) return;
         stateDue = clock + 0.2;
         var sc = project.Scenes;
         var isf = Player.Current >= 0 && Player.Current < sc.Count ? renderer.Get(sc[Player.Current].Shader).Isf : null;
-        remote.State = Remote.State(Player, isf, loadedName, projectNames, shaderFiles, Analyzer.Bands,
-            EffectDefs.SafeStrobeHz, renderer.StrobeActive, Device());
+        remote.State = Remote.State(Player, isf, loadedName, projectNames, shaderFiles, mediaFiles, Analyzer,
+            settings.MaxHz, renderer.StrobeActive, Device(), renderer.AutoDj);
     }
 
     object Device()
@@ -167,6 +211,14 @@ sealed class Engine : Java.Lang.Object, GLSurfaceView.IRenderer
             Source = audio.Active,
             settings.Scale,
             settings.Fps,
+            settings.Canvas,
+            settings.ViewX,
+            settings.ViewY,
+            settings.ViewW,
+            settings.ViewH,
+            settings.AllowFastStrobe,
+            ScreenW = width,
+            ScreenH = height,
         };
     }
 

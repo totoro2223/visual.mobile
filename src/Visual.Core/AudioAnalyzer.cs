@@ -17,10 +17,13 @@ public sealed class AudioAnalyzer
     // ponytail: calibration knobs, tuned by ear; the per-modifier gain covers the rest
     const float BandScale = 4f, DbFloor = -70f, AttackTau = 0.015f, ReleaseTau = 0.15f, PeakTau = 5f, PeakFloor = 0.05f;
     static readonly float[] BandEdges = [20, 250, 4000, 16000];
+    const float FluxTopHz = 4000, FluxBassWeight = 4; // the bass has few bins: weighted so the kick counts like the rest
 
     public readonly byte[] Wave = new byte[1024];          // 128 = silence; ISF "audio"
     public readonly byte[] Spectrum = new byte[FftSize / 2]; // dB-scaled 0..255; ISF "audioFFT"
+    readonly byte[] prevSpectrum = new byte[FftSize / 2];
     public readonly AudioBands Bands = new();
+    public readonly MusicMeter Music = new();
     public float InputGain = 1f;
     public int SampleRate = 48000;
 
@@ -64,7 +67,7 @@ public sealed class AudioAnalyzer
 
         Span<float> sum = stackalloc float[3];
         Span<int> count = stackalloc int[3];
-        float binHz = SampleRate / (float)FftSize;
+        float binHz = SampleRate / (float)FftSize, flux = 0;
         for (int k = 0; k < Spectrum.Length; k++)
         {
             float mag = MathF.Sqrt(re[k] * re[k] + im[k] * im[k]) * 4f / FftSize; // 1.0 = full-scale sine (Hann)
@@ -73,7 +76,10 @@ public sealed class AudioAnalyzer
             float hz = k * binHz;
             for (int b = 0; b < 3; b++)
                 if (hz >= BandEdges[b] && hz < BandEdges[b + 1]) { sum[b] += mag * mag; count[b]++; }
+            // onset strength for the tempo: how much the spectrum rose since the last frame, up to 4 kHz (kick, snare, chords)
+            if (hz < FluxTopHz && Spectrum[k] > prevSpectrum[k]) flux += (Spectrum[k] - prevSpectrum[k]) * (hz < BandEdges[1] ? FluxBassWeight : 1);
         }
+        Spectrum.CopyTo(prevSpectrum, 0);
 
         for (int b = 0; b < 3; b++)
         {
@@ -83,6 +89,7 @@ public sealed class AudioAnalyzer
             peak[b] = Math.Max(Math.Max(Bands.Raw[b], peak[b] * MathF.Exp(-dt / PeakTau)), PeakFloor);
             Bands.Norm[b] = Bands.Raw[b] / peak[b];
         }
+        Music.Update(Bands, flux / 255, dt);
     }
 
     static void Fft(float[] re, float[] im)

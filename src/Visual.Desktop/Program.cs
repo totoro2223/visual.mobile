@@ -49,6 +49,8 @@ sealed class Settings
     public static string ProjectsDir => Path.Combine(Dir, "projects");
 
     public string ShaderFolder { get; set; } = Path.Combine(AppContext.BaseDirectory, "shaders");
+    /// <summary>Videos and pictures the scenes can use (and where the remote uploads them).</summary>
+    public string MediaFolder { get; set; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyVideos), "Visual");
     public string? AudioDeviceId { get; set; }
     public float InputGain { get; set; } = 1;
     public bool AllowFastStrobe { get; set; }

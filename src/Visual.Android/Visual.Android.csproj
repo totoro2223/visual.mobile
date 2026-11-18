@@ -30,7 +30,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <AndroidAsset Include="..\..\shaders\*.fs" Link="Assets\shaders\%(Filename)%(Extension)" />
+    <AndroidAsset Include="..\..\shaders\*.fs;..\..\shaders\*.vs" Link="Assets\shaders\%(Filename)%(Extension)" />
   </ItemGroup>
 
 </Project>

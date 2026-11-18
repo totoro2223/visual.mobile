@@ -13,12 +13,15 @@ sealed partial class App
     readonly RemoteServer remote = new();
     double remoteClock, strobeUntil, stateDue;
     string remoteUrl = "", qrFor = "";
+    double copiedAt = -10;
     List<BitArray> qr = [];
 
     void StartRemote(bool newToken = false)
     {
         if (newToken || settings.RemoteToken == null) settings.RemoteToken = RandomNumberGenerator.GetHexString(10, true);
         remote.Start(settings.RemotePort, settings.RemoteToken);
+        remote.MediaFolder = settings.MediaFolder;
+        remote.ShaderFolder = settings.ShaderFolder;
         remoteUrl = $"http://{RemoteServer.LocalAddress()}:{remote.Port}/?k={remote.Token}";
     }
 
@@ -31,7 +34,7 @@ sealed partial class App
         {
             try
             {
-                switch (Remote.Apply(c, player, shaderFiles))
+                switch (Remote.Apply(c, player, shaderFiles, analyzer.Music))
                 {
                     case "strobe":
                         // the phone re-sends every 0.4 s while held; if it goes quiet (lost Wi-Fi) the strobe stops by itself
@@ -49,24 +52,37 @@ sealed partial class App
                         status = "Shader subido: " + Remote.SaveShader(settings.ShaderFolder, c["name"]!.GetValue<string>(), c["text"]!.GetValue<string>());
                         ReloadShaders();
                         break;
+                    case "mediaChanged":
+                        status = "Archivo subido: " + c["name"]?.GetValue<string>();
+                        ReloadShaders(); // a replaced video reopens
+                        break;
+                    case "deleteMedia":
+                        if (c["name"]?.GetValue<string>() is { } dm && Media.ValidName(dm))
+                        {
+                            renderer.ReleaseMedia(); // Windows can't delete an open file
+                            File.Delete(Path.Combine(settings.MediaFolder, dm));
+                            ReloadShaders();
+                        }
+                        break;
                     case "new": NewProject(); break;
                     case "duplicate": DuplicateProject(); break;
+                    case "import": ImportProject(c["text"]!.GetValue<string>()); break;
                 }
             }
             catch (Exception e) { status = "Control remoto: " + e.Message; }
         }
+        remote.AnswerExports(project);
         renderer.StrobeHeld = remoteClock < strobeUntil;
         if (remoteClock < stateDue) return;
         stateDue = remoteClock + 0.2;
         var scenes = project.Scenes;
         var isf = player.Current >= 0 && player.Current < scenes.Count ? renderer.Get(scenes[player.Current].Shader).Isf : null;
-        remote.State = Remote.State(player, isf, loadedName, projectNames, shaderFiles, analyzer.Bands,
-            settings.AllowFastStrobe ? 20 : EffectDefs.SafeStrobeHz, renderer.StrobeActive);
+        remote.State = Remote.State(player, isf, loadedName, projectNames, shaderFiles, mediaFiles, analyzer,
+            settings.AllowFastStrobe ? 20 : EffectDefs.SafeStrobeHz, renderer.StrobeActive, dj: renderer.AutoDj);
     }
 
     void RemoteSettings()
     {
-        ImGui.Separator();
         bool on = settings.RemoteEnabled;
         if (ImGui.Checkbox("Control remoto por Wi-Fi", ref on))
         {
@@ -89,6 +105,10 @@ sealed partial class App
             DrawQr(remoteUrl, 240);
             string url = remoteUrl;
             ImGui.InputText("##url", ref url, 256, ImGuiInputTextFlags.ReadOnly);
+            ImGui.SameLine();
+            if (ImGui.Button("Copiar"))
+                try { System.Windows.Forms.Clipboard.SetText(remoteUrl); copiedAt = ImGui.GetTime(); } catch { } // clipboard busy in another app
+            if (ImGui.GetTime() - copiedAt < 2) { ImGui.SameLine(); ImGui.TextDisabled("copiada"); }
             if (ImGui.Button("Nuevo código")) { StartRemote(newToken: true); settings.Save(); }
             ImGui.SameLine();
             ImGui.TextDisabled("los teléfonos conectados dejan de funcionar");
