@@ -6,7 +6,7 @@ namespace Visual.Desktop;
 
 sealed partial class App
 {
-    static readonly string[] KindNames = ["Constante", "Lineal", "Audio"];
+    static readonly string[] KindNames = ["Constante", "Lineal", "Audio", "Lineal audio"];
     static readonly string[] ModeNames = ["Reiniciar", "Rebotar", "Rebotar invertido"];
     static readonly string[] BandNames = ["Graves", "Medios", "Agudos", "Melodía", "Nota"];
     static readonly string[] NoteNames = ["Do", "Do#", "Re", "Re#", "Mi", "Fa", "Fa#", "Sol", "Sol#", "La", "La#", "Si"];
@@ -553,12 +553,12 @@ sealed partial class App
             if (m.Kind != ModKind.Constant)
             {
                 bool inv = m.Invert;
-                if (ImGui.Checkbox(m.Kind == ModKind.Linear ? "Invertir (recorre al revés)" : "Invertir (más sonido = menos valor)", ref inv)) m.Invert = inv;
+                if (ImGui.Checkbox(m.Kind != ModKind.Audio ? "Invertir (recorre al revés)" : "Invertir (más sonido = menos valor)", ref inv)) m.Invert = inv;
             }
-            if (m.Kind == ModKind.Linear)
+            if (m.Kind is ModKind.Linear or ModKind.LinearAudio)
             {
                 float speed = m.Speed;
-                if (ImGui.SliderFloat("Velocidad (recorridos/s)", ref speed, 0.001f, 5f, "%.3f", ImGuiSliderFlags.Logarithmic)) m.Speed = speed;
+                if (ImGui.SliderFloat(m.Kind == ModKind.Linear ? "Velocidad (recorridos/s)" : "Velocidad máxima (recorridos/s)", ref speed, 0.001f, 5f, "%.3f", ImGuiSliderFlags.Logarithmic)) m.Speed = speed;
                 int mode = (int)m.Mode;
                 if (ImGui.Combo("Al llegar al borde", ref mode, ModeNames, ModeNames.Length)) m.Mode = (LinearMode)mode;
                 CurveCombo(m);
@@ -568,12 +568,13 @@ sealed partial class App
                     if (ImGui.SliderInt(m.Ease == Ease.Steps ? "Pasos" : "Valores por recorrido", ref steps, 2, 16)) m.Steps = steps;
                 }
             }
-            else if (m.Kind == ModKind.Audio)
+            if (m.Kind is ModKind.Audio or ModKind.LinearAudio)
             {
                 int band = (int)m.Band;
                 if (ImGui.Combo("Banda", ref band, BandNames, BandNames.Length)) m.Band = (Band)band;
+                if (m.Kind == ModKind.LinearAudio) ImGui.TextDisabled("Avanza más rápido cuanto más pasa la banda del umbral; debajo se queda quieto.");
                 float a = m.Amount;
-                if (ImGui.SliderFloat("Intensidad", ref a, -1f, 1f)) m.Amount = a;
+                if (m.Kind == ModKind.Audio && ImGui.SliderFloat("Intensidad", ref a, -1f, 1f)) m.Amount = a;
                 float g = m.Gain;
                 if (ImGui.SliderFloat("Ganancia", ref g, 0.1f, 10f, "x%.2f", ImGuiSliderFlags.Logarithmic)) m.Gain = g;
                 float th = m.Threshold;

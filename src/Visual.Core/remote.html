@@ -118,7 +118,7 @@ details.playing > summary::after { content: ' · disparando'; color: #ffd84d; }
 <script>
 const K = new URLSearchParams(location.search).get('k') || '';
 const BANDS = ['Graves', 'Medios', 'Agudos', 'Melodía', 'Nota'], BANDS_V = ['Bass', 'Mid', 'High', 'Melody', 'Note'], LEVELS = ['Auto', 'Suave', 'Media', 'Fuerte'];
-const KINDS = ['Constante', 'Lineal', 'Audio'], KINDS_V = ['Constant', 'Linear', 'Audio'], MODES_V = ['Loop', 'PingPong', 'Mirror'];
+const KINDS = ['Constante', 'Lineal', 'Audio', 'Lineal audio'], KINDS_V = ['Constant', 'Linear', 'Audio', 'LinearAudio'], MODES_V = ['Loop', 'PingPong', 'Mirror'];
 const m = document.getElementById('m');
 // per-phone conveniences (open cards, last tab); storage can be blocked, so never rely on it
 const store = { get: k => { try { return localStorage.getItem(k); } catch { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch {} } };
@@ -249,7 +249,7 @@ const hex = v => '#' + [0, 1, 2].map(k => Math.round(Math.min(1, Math.max(0, v[k
 // value + modifier, like the PC panel: name · modifier · ⚙ on one line, the slider (limited to the range) below,
 // range / invert / modifier settings folded behind ⚙. opt.cap: lower top for the slider; opt.decorate(label): add a switch / dot
 const openMods = new Set(); // ⚙ open this session (survives rebuilds)
-const KINDS_S = ['Const', 'Lineal', 'Audio'];
+const KINDS_S = ['Const', 'Lineal', 'Audio', 'Lin. audio'];
 const clamp01 = x => Math.min(1, Math.max(0, x));
 function range(md, min, max) { // same as Modifier.Range in C#
   const f = clamp01(md.From ?? 0), t = clamp01(md.To ?? 1);
@@ -330,16 +330,18 @@ function paramEd(label, ps, min, max, labels, key, mk, opt = {}) {
                  lim('Hasta', full, x => { md.To = Math.max(frac(x), md.From ?? 0); go(); }));
       if ((md.From ?? 0) > 0 || (md.To ?? 1) < 1) box.append(el('div', { class: 'row' }, btn('Rango completo', () => { md.From = 0; md.To = 1; go(); draw(); })));
       if (md.Kind !== 'Constant')
-        box.append(chk(md.Kind === 'Linear' ? 'Invertir (recorre al revés)' : 'Invertir (más sonido = menos valor)', !!md.Invert, b => { md.Invert = b; go(); draw(); }));
-      if (md.Kind === 'Linear') box.append(
-        slider('Velocidad (recorridos/s)', md.Speed, 0.001, 5, x => { md.Speed = x; go(); }, true),
+        box.append(chk(md.Kind !== 'Audio' ? 'Invertir (recorre al revés)' : 'Invertir (más sonido = menos valor)', !!md.Invert, b => { md.Invert = b; go(); draw(); }));
+      const lin = md.Kind === 'Linear' || md.Kind === 'LinearAudio', aud = md.Kind === 'Audio' || md.Kind === 'LinearAudio';
+      if (lin) box.append(
+        slider(md.Kind === 'Linear' ? 'Velocidad (recorridos/s)' : 'Velocidad máxima (recorridos/s)', md.Speed, 0.001, 5, x => { md.Speed = x; go(); }, true),
         sel('Al llegar al borde', ['Reiniciar', 'Rebotar', 'Rebotar invertido'], Math.max(0, MODES_V.indexOf(md.Mode)), i => { md.Mode = MODES_V[i]; go(); }),
         row('Curva', curvePick(md, () => { go(); draw(); })));
-      if (md.Kind === 'Linear' && /Steps|Random/.test(md.Ease || ''))
+      if (lin && /Steps|Random/.test(md.Ease || ''))
         box.append(slider(md.Ease === 'Steps' ? 'Pasos' : 'Valores por recorrido', md.Steps ?? 4, 2, 16, x => { md.Steps = Math.round(x); go(); }));
-      if (md.Kind === 'Audio') box.append(
+      if (aud) box.append(
         sel('Banda', BANDS, BANDS_V.indexOf(md.Band), i => { md.Band = BANDS_V[i]; go(); }),
-        slider('Intensidad', md.Amount, -1, 1, x => { md.Amount = x; go(); }),
+        ...(md.Kind === 'Audio' ? [slider('Intensidad', md.Amount, -1, 1, x => { md.Amount = x; go(); })]
+          : [hint('Avanza más rápido cuanto más pasa la banda del umbral; debajo se queda quieto.')]),
         slider('Ganancia', md.Gain, 0.1, 10, x => { md.Gain = x; go(); }, true),
         slider('Umbral', md.Threshold, 0, 0.95, x => { md.Threshold = x; go(); }),
         chk('Auto-ganancia', md.AutoGain, b => { md.AutoGain = b; go(); }));

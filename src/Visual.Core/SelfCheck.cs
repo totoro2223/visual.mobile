@@ -44,6 +44,7 @@ public static class SelfCheck
         Near(pp.Apply(0, 0, 10, 1.5, bands), 5);   // coming back
         Near(pp.Apply(0, 0, 10, 2.0, bands), 0);
         Near(new Modifier { Kind = ModKind.Linear, Speed = 1 }.Apply(0, 0, 10, 0.25, bands), 2.5f);
+        LinearAudioCheck();
         bands.Raw[0] = 0.5f;
         Near(new Modifier { Kind = ModKind.Audio, Amount = 1, Gain = 2 }.Apply(0, 0, 10, 0, bands), 10);
         Near(new Modifier { Kind = ModKind.Audio, Amount = 1, Threshold = 0.5f }.Apply(0, 0, 10, 0, bands), 0);
@@ -392,6 +393,26 @@ public static class SelfCheck
     }
 
     /// <summary>Feeds <paramref name="frames"/> frames at 60 fps of a signal (sample index -> value) and returns the analyzer.</summary>
+    // Lineal audio: still in silence, sweeps at Speed with the band full, half as fast halfway past the threshold; bounce kept
+    static void LinearAudioCheck()
+    {
+        var b = new AudioBands();
+        var m = new Modifier { Kind = ModKind.LinearAudio, Speed = 1, Mode = LinearMode.PingPong, Threshold = 0.5f };
+        double t = 0;
+        float Run(float level, double secs)
+        {
+            b.Raw[0] = level;
+            for (double end = t + secs; t < end - 1e-9; t += 0.05) m.Apply(0, 0, 10, t, b);
+            return m.Apply(0, 0, 10, t, b);
+        }
+        Check(MathF.Abs(Run(0, 1)) < 0.01f, "lineal audio: quieto en silencio");
+        Check(MathF.Abs(Run(1, 1.5) - 5) < 0.2f, "lineal audio: avanza y rebota con la banda llena");
+        Check(MathF.Abs(Run(0.3f, 1) - 5) < 0.2f, "lineal audio: bajo el umbral se queda donde está");
+        Check(MathF.Abs(Run(0.75f, 1) - 0) < 0.2f, "lineal audio: a mitad del umbral va a mitad de velocidad");
+        t = 0;
+        Check(MathF.Abs(m.Apply(3, 0, 10, 0, b) - 3) < 0.01f, "lineal audio: la escena que vuelve a empezar arranca del slider");
+    }
+
     static AudioAnalyzer Feed(Func<int, float> sig, int frames, AudioAnalyzer? a = null)
     {
         a ??= new AudioAnalyzer { SampleRate = 48000 };

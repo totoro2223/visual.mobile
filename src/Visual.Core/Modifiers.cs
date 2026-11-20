@@ -1,6 +1,7 @@
 namespace Visual.Core;
 
-public enum ModKind { Constant, Linear, Audio }
+/// <summary>LinearAudio = a Linear sweep whose speed follows an audio band (still below the threshold).</summary>
+public enum ModKind { Constant, Linear, Audio, LinearAudio }
 /// <summary>At the edge: start over, come back playing the curve backwards, or come back with the curve flipped (same shape going down).</summary>
 public enum LinearMode { Loop, PingPong, Mirror }
 /// <summary>Shape of a Linear sweep inside its range (see Curves).</summary>
@@ -32,6 +33,9 @@ public sealed class Modifier
     /// <summary>Linear runs backwards; Audio pushes the other way (more sound = lower value).</summary>
     public bool Invert { get; set; }
 
+    // LinearAudio: where the sweep is, advanced each frame (not saved; starts again from the slider when the scene does)
+    double phase, last = double.NaN;
+
     public Modifier Clone() => (Modifier)MemberwiseClone();
 
     /// <summary>The working range in the parameter's units, low to high.</summary>
@@ -42,18 +46,30 @@ public sealed class Modifier
         return (Math.Min(a, b), Math.Max(a, b));
     }
 
+    /// <summary>Band level past the threshold, 0..1.</summary>
+    float Level(AudioBands bands) =>
+        Math.Clamp((bands.Get(Band, AutoGain) * Gain - Threshold) / (1 - Math.Min(Threshold, 0.99f)), 0, 1);
+
     public float Apply(float value, float min, float max, double time, AudioBands bands)
     {
         var (lo, hi) = Range(min, max);
         float range = hi - lo;
         switch (Kind)
         {
-            case ModKind.Linear:
+            case ModKind.Linear or ModKind.LinearAudio:
             {
                 double start = range != 0 ? (Math.Clamp(value, lo, hi) - lo) / range : 0;
                 int steps = Math.Clamp(Steps, 2, 16);
                 if (Invert) start = 1 - start;
-                double ph = Curves.Find(Ease, steps, start) + time * Speed; // starts at the slider value either way
+                double ph = Curves.Find(Ease, steps, start); // starts at the slider value either way
+                if (Kind == ModKind.Linear) ph += time * Speed;
+                else
+                {
+                    if (!(time >= last)) phase = ph; // first frame, or the scene started again
+                    else phase += Math.Min(time - last, 0.1) * Speed * Level(bands); // same time twice (UI + render) = no step
+                    last = time;
+                    ph = phase;
+                }
                 double x = ph - Math.Floor(ph);
                 double f = Ease is Ease.RandomSteps or Ease.RandomSmooth ? Curves.Random(Ease, ph * steps) // random values don't loop or bounce
                     : Mode == LinearMode.PingPong ? Curves.Of(Ease, steps, 1 - Math.Abs(1 - 2 * (ph * 0.5 - Math.Floor(ph * 0.5))))
@@ -64,8 +80,7 @@ public sealed class Modifier
             }
 
             case ModKind.Audio:
-                float a = bands.Get(Band, AutoGain) * Gain;
-                a = Math.Clamp((a - Threshold) / (1 - Math.Min(Threshold, 0.99f)), 0, 1) * Math.Abs(Amount);
+                float a = Level(bands) * Math.Abs(Amount);
                 // From is 0 % and To is 100 %, the slider value isn't used; inverted (or negative Intensity) rests at To and goes down
                 return (Amount < 0) != Invert ? hi - a * range : lo + a * range;
 
