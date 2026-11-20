@@ -565,7 +565,7 @@ function inputsEd(inputs, params, media, base, kp, filter) {
 // in use (with their siblings: strobe, mask, monocolor) apart from the rest, like the PC
 function fxEd(effects, base, kp) {
   const defs = S.EffectDefs.filter(d => effects && effects[d.Name]);
-  const grp = n => /^strobe/.test(n) ? 'strobe' : /^mask/.test(n) ? 'mask' : /^tint/.test(n) ? 'tint' : n;
+  const grp = n => /^strobe/.test(n) ? 'strobe' : /^mask/.test(n) ? 'mask' : /^tint/.test(n) ? 'tint' : /^tilt/.test(n) ? 'tilt' : n;
   const inUse = d => { // same as EffectDefs.IsActive
     const ps = effects[d.Name];
     if (ps.Off) return false;

@@ -76,6 +76,10 @@ public static class EffectDefs
         new("zoom", "Zoom", 0.2f, 5, 1),
         new("rotation", "Rotación", 0, 1, 0),
         new("kaleido", "Caleidoscopio", 0, 12, 0),
+        // tilt: the picture as a plane seen in perspective; outside the plane is black
+        new("tiltX", "Inclinación X", -80, 80, 0),   // degrees; + lays the top away
+        new("tiltY", "Inclinación Y", -80, 80, 0),   // + lays the right side away
+        new("tiltPersp", "Perspectiva", 0.2f, 3, 1), // higher = the far side shrinks more
         new("chroma", "Aberración cromática", 0, 0.05f, 0),
         new("vignette", "Viñeta", 0, 1, 0),
         new("feedback", "Feedback", 0, 0.98f, 0),
@@ -106,13 +110,13 @@ public static class EffectDefs
 
     /// <summary>Effects shown and moved together (strobe, mask, monocolor): one in use pulls in its siblings.</summary>
     public static string Group(string name) =>
-        name.StartsWith("strobe") ? "strobe" : name.StartsWith("mask") ? "mask" : name.StartsWith("tint") ? "tint" : name;
+        name.StartsWith("strobe") ? "strobe" : name.StartsWith("mask") ? "mask" : name.StartsWith("tint") ? "tint" : name.StartsWith("tilt") ? "tilt" : name;
 
     /// <summary>Short names of the effects a scene is using; the strobe counts once, by its rate.</summary>
     public static string[] ActiveLabels(Dictionary<string, ParamState> fx) => All
-        .Where(d => d.Name is not ("strobeDuty" or "strobeIntensity" or "strobeMode" or "strobeHue" or "tintHue" or "maskX" or "maskY" or "maskSoft")
+        .Where(d => d.Name is not ("strobeDuty" or "strobeIntensity" or "strobeMode" or "strobeHue" or "tintHue" or "maskX" or "maskY" or "maskSoft" or "tiltY" or "tiltPersp")
                     && fx.TryGetValue(d.Name, out var ps) && IsActive(d, ps))
-        .Select(d => d.Name == "strobeRate" ? "Strobe" : d.Name.StartsWith("mask") ? "Máscara" : d.Label)
+        .Select(d => d.Name == "strobeRate" ? "Strobe" : d.Name.StartsWith("mask") ? "Máscara" : d.Name.StartsWith("tilt") ? "Inclinación" : d.Label)
         .Distinct()
         .ToArray();
 
@@ -124,15 +128,32 @@ public static class EffectDefs
         uniform float mixB;
         uniform float layer; // 1 = a layer: opacity, mask and its shader's alpha go to the alpha (premultiplied), for the blend
         uniform vec2 RENDERSIZE;
-        uniform float brightness, contrast, saturation, hue, zoom, rotation, kaleido, chroma, vignette, feedback, tint, tintHue, opacity, strobe, strobeMode, strobeHue, maskX, maskY, maskW, maskH, maskSoft;
+        uniform float brightness, contrast, saturation, hue, zoom, rotation, kaleido, chroma, vignette, feedback, tint, tintHue, opacity, strobe, strobeMode, strobeHue, maskX, maskY, maskW, maskH, maskSoft, tiltX, tiltY, tiltPersp;
         varying vec2 isf_FragNormCoord;
         const float TAU = 6.2831853;
 
         vec3 scene(vec2 uv) { return mix(texture2D(sceneA, uv).rgb, texture2D(sceneB, uv).rgb, mixB); }
 
+        float onPlane = 1.0;
+
+        // the screen point seen on the tilted plane: ray from the eye (at focal distance) to the plane through the center
+        vec2 tilt(vec2 p, vec2 asp) {
+            if (tiltX == 0.0 && tiltY == 0.0) return p;
+            float ax = radians(tiltX), ay = radians(tiltY), sx = sin(ax), cx = cos(ax), sy = sin(ay), cy = cos(ay);
+            vec3 u = vec3(cy, 0.0, -sy), v = vec3(sy * sx, cx, cy * sx), n = vec3(sy * cx, -sx, cy * cx);
+            float f = 2.0 / max(tiltPersp, 0.01);
+            vec3 o = vec3(0.0, 0.0, -f), d = vec3(p, f);
+            float dn = dot(d, n);
+            if (dn <= 1e-5) { onPlane = 0.0; return p; } // past the horizon
+            vec3 h = o + d * (f * n.z / dn);
+            vec2 q = vec2(dot(h, u), dot(h, v));
+            if (any(greaterThan(abs(q), asp * 0.5))) onPlane = 0.0;
+            return q;
+        }
+
         vec2 geometry(vec2 uv) {
             vec2 asp = vec2(RENDERSIZE.x / RENDERSIZE.y, 1.0);
-            vec2 p = (uv - 0.5) * asp / zoom;
+            vec2 p = tilt((uv - 0.5) * asp, asp) / zoom;
             float a = rotation * TAU;
             p = mat2(cos(a), sin(a), -sin(a), cos(a)) * p;
             if (kaleido >= 1.0) {
@@ -170,8 +191,8 @@ public static class EffectDefs
             vec2 d = abs(isf_FragNormCoord - vec2(maskX, maskY)) - 0.5 * vec2(maskW, maskH);
             vec2 m = clamp(-d / max(maskSoft, 0.0001), 0.0, 1.0);
             m = m * m * (3.0 - 2.0 * m);
-            c = clamp(mix(c, s, strobe), 0.0, 1.0);
-            float a = layer < 0.5 ? 1.0 : clamp(texture2D(sceneA, uv).a, 0.0, 1.0) * opacity * m.x * m.y;
+            c = clamp(mix(c, s, strobe), 0.0, 1.0) * onPlane;
+            float a = layer < 0.5 ? 1.0 : clamp(texture2D(sceneA, uv).a, 0.0, 1.0) * opacity * m.x * m.y * onPlane;
             gl_FragColor = layer < 0.5 ? vec4(c * m.x * m.y, 1.0) : vec4(c * a, a);
         }
         """;

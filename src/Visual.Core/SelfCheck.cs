@@ -207,6 +207,9 @@ public static class SelfCheck
         };
         p.EnsureEffects();
         Check(p.Effects == null && p.Scenes.All(s => s.Effects["zoom"].Value[0] == 2), "efectos: migración a escenas");
+        Check(p.Scenes[0].Effects.ContainsKey("tiltX") && EffectDefs.ActiveLabels(p.Scenes[0].Effects).Length == 1 // only the zoom: no tilt by default
+              && EffectDefs.Group("tiltPersp") == "tilt" && EffectDefs.PostFragment("").Contains("uniform float brightness") && EffectDefs.PostFragment("").Contains("tiltPersp;"),
+            "efectos: inclinación (apagada por defecto, en grupo)");
         p.Scenes[0].Effects["zoom"].Value[0] = 3;
         Check(p.Scenes[1].Effects["zoom"].Value[0] == 2, "efectos: copias independientes");
         p.Scenes[0].Effects["strobeDuty"].Value[0] = 0.5f;
