@@ -36,9 +36,11 @@ public sealed unsafe class Renderer : IDisposable
 
     readonly GL gl;
     readonly uint vao, vbo, waveTex, fftTex, blackTex;
-    readonly ShaderProgram post;
+    readonly ShaderProgram post, blend;
     readonly Dictionary<string, ShaderProgram> cache = [];
     Target sceneA, sceneB, ping, pong;
+    Target layerRaw, layerFx, spare; // layers: its shader, its effects, the mix (swapped with the scene's picture)
+    float maxHzNow = EffectDefs.SafeStrobeHz, strobeScale = 1;
     int w, h, frameIndex;
     double strobePhase;
     bool strobeWasOn;
@@ -78,6 +80,7 @@ public sealed unsafe class Renderer : IDisposable
         blackTex = DataTexture();
         Upload(blackTex, [0]);
         post = new ShaderProgram { Id = Compile(EffectDefs.PostFragment(Version)) };
+        blend = new ShaderProgram { Id = Compile(Blends.Fragment(Version)) };
     }
 
     public ShaderProgram Get(string file)
@@ -115,9 +118,9 @@ public sealed unsafe class Renderer : IDisposable
                 foreach (var t in new[] { a, b }) { gl.DeleteFramebuffer(t.Fbo); gl.DeleteTexture(t.Tex); }
         }
     }
-    readonly Dictionary<Scene, PassBuffers> buffers = [];
+    readonly Dictionary<Picture, PassBuffers> buffers = [];
 
-    PassBuffers BuffersFor(Scene scene, ShaderProgram p)
+    PassBuffers BuffersFor(Picture scene, ShaderProgram p)
     {
         if (buffers.TryGetValue(scene, out var b) && b.Owner == p && b.W == w && b.H == h) return b;
         b?.Free(gl); // another shader or size: start over (black)
@@ -150,6 +153,13 @@ public sealed unsafe class Renderer : IDisposable
         return (0, 0, sw, sh);
     }
 
+    /// <summary>Size drawn at for an output of w x h: Scale of it (0.25..1), at least a pixel.</summary>
+    public static (float W, float H) InternalSize(int w, int h, float scale)
+    {
+        float s = float.IsFinite(scale) ? Math.Clamp(scale, 0.25f, 1f) : 1;
+        return (Math.Max(1, w * s), Math.Max(1, h * s));
+    }
+
     /// <summary>Where the last frame went, as fractions of the area given to Render (the output window copies it there too).</summary>
     public (float X, float Y, float W, float H) Placed { get; private set; } = (0, 0, 1, 1);
 
@@ -174,7 +184,7 @@ public sealed unsafe class Renderer : IDisposable
     }
 
     /// <summary>Draws into the area (x, y from the top-left, width x height) of a screen of screenW x screenH; the rest is black.</summary>
-    /// <param name="renderW">internal size when it isn't the on-screen size (a separate output window); 0 = width * Scale</param>
+    /// <param name="renderW">output size when it isn't the on-screen size (a separate output window), drawn at Scale of it too; 0 = width</param>
     /// <param name="global">canvas in pixels of the area for scenes without their own; null = the whole area</param>
     public void Render(Player player, AudioAnalyzer audio, float dt, int x, int y, int width, int height, int screenW, int screenH, bool allowFastStrobe,
         int renderW = 0, int renderH = 0, (int X, int Y, int W, int H)? global = null)
@@ -184,7 +194,8 @@ public sealed unsafe class Renderer : IDisposable
         float maxHz = allowFastStrobe ? 20f : EffectDefs.SafeStrobeHz;
         player.Project.EnsureEffects();
         bool sceneStrobe = Fx(player, audio, "strobeRate") > 0;
-        if (autoStrobe.Update(player.Project.AutoStrobe, audio.Bands, dt, maxHz, blocked: sceneStrobe) && player.Project.AutoStrobe.NextScene) player.Next();
+        if (autoStrobe.Update(player.Project.AutoStrobe, audio.Bands, dt, maxHz, blocked: sceneStrobe)
+            && autoStrobe.Ended(player.Project.AutoStrobe)?.NextScene == true) player.Next();
         autoDj.Update(player.Project.AutoDj, player, audio.Music, dt);
         StrobeActive = sceneStrobe || autoStrobe.Active || StrobeHeld;
         gl.Disable(EnableCap.Blend);
@@ -194,7 +205,7 @@ public sealed unsafe class Renderer : IDisposable
         var g = global is { } gr ? (gr.X / (float)width, gr.Y / (float)height, gr.W / (float)width, gr.H / (float)height) : (0f, 0f, 1f, 1f);
         var (cur, f) = Place(player, g, renderW > 0 ? renderW : width, renderH > 0 ? renderH : height);
         // sized for the new scene's canvas; during a fade the picture stretches a little while the rectangle slides
-        float iw = renderW > 0 ? renderW : width * Scale, ih = renderH > 0 ? renderH : height * Scale;
+        var (iw, ih) = InternalSize(renderW > 0 ? renderW : width, renderH > 0 ? renderH : height, Scale);
         EnsureSize(Math.Max(1, (int)(iw * cur.W)), Math.Max(1, (int)(ih * cur.H)));
         gl.BindVertexArray(vao);
         gl.Viewport(0, 0, (uint)w, (uint)h);
@@ -202,9 +213,13 @@ public sealed unsafe class Renderer : IDisposable
         Upload(fftTex, audio.Spectrum);
 
         var scenes = player.Project.Scenes;
-        DrawScene(player.Current >= 0 ? scenes[player.Current] : null, player.SceneTime, dt, sceneA, audio);
+        maxHzNow = maxHz;
+        // ponytail: the safety limit counts every strobe's rate added up (an upper bound: flashes that coincide count twice)
+        float total = StrobeTotal(player, Time, audio.Bands, maxHz, SceneStrobeRate(player, audio, maxHz));
+        strobeScale = total > maxHz ? maxHz / total : 1;
+        DrawScene(player.Current >= 0 ? scenes[player.Current] : null, player.SceneTime, dt, ref sceneA, audio);
         bool fading = player.Previous >= 0;
-        if (fading) DrawScene(scenes[player.Previous], player.PrevTime, dt, sceneB, audio);
+        if (fading) DrawScene(scenes[player.Previous], player.PrevTime, dt, ref sceneB, audio);
         DrawPost(player, audio, dt, fading ? 1 - player.Fade : 0, maxHz);
         MeasureMotion(player, dt);
 
@@ -233,6 +248,11 @@ public sealed unsafe class Renderer : IDisposable
             b.Free(gl);
             buffers.Remove(k);
         }
+        foreach (var (k, s) in layerStates.Where(kv => kv.Value.Used < frameIndex - 30).ToList())
+        {
+            s.Free(gl);
+            layerStates.Remove(k);
+        }
         frameIndex++;
     }
 
@@ -246,10 +266,10 @@ public sealed unsafe class Renderer : IDisposable
         public string? Error;
         public int Used = -1;
     }
-    readonly Dictionary<(Scene, string), MediaSlot> media = [];
+    readonly Dictionary<(Picture, string), MediaSlot> media = [];
 
     /// <summary>The scene's video for an input, opened on first use and advanced once per frame.</summary>
-    IMediaSource? MediaFor(Scene scene, string input, float dt)
+    IMediaSource? MediaFor(Picture scene, string input, float dt)
     {
         if (OpenMedia == null || !scene.Media.TryGetValue(input, out var m) || m.Src == "") return null;
         if (!media.TryGetValue((scene, input), out var slot) || slot.Src != m.Src)
@@ -269,7 +289,7 @@ public sealed unsafe class Renderer : IDisposable
     }
 
     /// <summary>Problem with a scene's video, for the panels; null if fine or not playing.</summary>
-    public string? MediaError(Scene scene, string input) =>
+    public string? MediaError(Picture scene, string input) =>
         media.TryGetValue((scene, input), out var s) ? s.Error ?? s.Source?.Error : null;
 
     /// <summary>Closes every video (they reopen when drawn): before deleting or replacing a file.</summary>
@@ -279,7 +299,113 @@ public sealed unsafe class Renderer : IDisposable
         media.Clear();
     }
 
-    void DrawScene(Scene? scene, double time, float dt, Target target, AudioAnalyzer audio)
+    /// <summary>The scene's base shader, then each layer: its shader, its effects, mixed over what is below with its blend.</summary>
+    void DrawScene(Scene? scene, double time, float dt, ref Target target, AudioAnalyzer audio)
+    {
+        DrawPicture(scene, time, dt, target, audio);
+        if (scene == null) return;
+        foreach (var l in scene.Layers)
+        {
+            if (l.Off || Get(l.Shader).Id == 0) continue;
+            DrawPicture(l, time, dt, layerRaw, audio, below: target.Tex);
+            var st = LayerStateFor(l);
+            float E(string n) => Fx(l, n, audio);
+            Target into;
+            uint prev = blackTex;
+            if (E("feedback") > 0) // its own last frame, kept only while it uses feedback
+            {
+                if (st.Front.Fbo == 0) (st.Front, st.Back) = (MakeTarget(false), MakeTarget(false));
+                (into, prev) = (st.Back, st.Front.Tex);
+                (st.Front, st.Back) = (st.Back, st.Front);
+            }
+            else
+            {
+                st.Free(gl);
+                into = layerFx;
+            }
+            gl.BindFramebuffer(FramebufferTarget.Framebuffer, into.Fbo);
+            gl.UseProgram(post.Id);
+            Bind(0, layerRaw.Tex, "sceneA");
+            Bind(1, layerRaw.Tex, "sceneB");
+            Bind(2, prev, "prevOut");
+            gl.Uniform1(post.Loc(gl, "mixB"), 0f);
+            gl.Uniform1(post.Loc(gl, "layer"), 1f);
+            gl.Uniform2(post.Loc(gl, "RENDERSIZE"), (float)w, (float)h);
+            foreach (var d in EffectDefs.All)
+                if (!d.Name.StartsWith("strobe")) gl.Uniform1(post.Loc(gl, d.Name), E(d.Name));
+            float rate = Math.Clamp(E("strobeRate"), 0, maxHzNow) * strobeScale;
+            st.StrobePhase = (st.StrobePhase + dt * rate) % 1.0;
+            bool on = rate > 0 && st.StrobePhase < E("strobeDuty");
+            if (on && !st.StrobeWasOn) st.RandomHue = Random.Shared.NextSingle();
+            st.StrobeWasOn = on;
+            float mode = MathF.Round(E("strobeMode"));
+            gl.Uniform1(post.Loc(gl, "strobe"), on ? E("strobeIntensity") : 0f);
+            gl.Uniform1(post.Loc(gl, "strobeMode"), mode);
+            gl.Uniform1(post.Loc(gl, "strobeHue"), mode > 3.5f ? st.RandomHue : E("strobeHue"));
+            gl.DrawArrays(PrimitiveType.TriangleStrip, 0, 4);
+
+            gl.BindFramebuffer(FramebufferTarget.Framebuffer, spare.Fbo);
+            gl.UseProgram(blend.Id);
+            gl.ActiveTexture(TextureUnit.Texture0);
+            gl.BindTexture(TextureTarget.Texture2D, target.Tex);
+            gl.Uniform1(blend.Loc(gl, "below"), 0);
+            gl.ActiveTexture(TextureUnit.Texture1);
+            gl.BindTexture(TextureTarget.Texture2D, into.Tex);
+            gl.Uniform1(blend.Loc(gl, "over"), 1);
+            gl.Uniform1(blend.Loc(gl, "mode"), (int)l.Blend);
+            gl.DrawArrays(PrimitiveType.TriangleStrip, 0, 4);
+            gl.ActiveTexture(TextureUnit.Texture0);
+            (target, spare) = (spare, target);
+        }
+    }
+
+    /// <summary>A layer's own last frame (feedback) and strobe.</summary>
+    sealed class LayerState
+    {
+        public Target Front, Back;
+        public int W, H, Used;
+        public double StrobePhase;
+        public bool StrobeWasOn;
+        public float RandomHue;
+
+        public void Free(GL gl)
+        {
+            foreach (var t in new[] { Front, Back }) if (t.Fbo != 0) { gl.DeleteFramebuffer(t.Fbo); gl.DeleteTexture(t.Tex); }
+            Front = Back = default;
+        }
+    }
+    readonly Dictionary<Layer, LayerState> layerStates = [];
+
+    LayerState LayerStateFor(Layer l)
+    {
+        if (!layerStates.TryGetValue(l, out var s)) layerStates[l] = s = new LayerState();
+        if (s.W != w || s.H != h) { s.Free(gl); (s.W, s.H) = (w, h); }
+        s.Used = frameIndex;
+        return s;
+    }
+
+    /// <summary>Strobe flashes of the scenes on screen and their layers, per second, before the safety limit.</summary>
+    public static float StrobeTotal(Player pl, double time, AudioBands bands, float maxHz, float sceneRate)
+    {
+        float total = sceneRate;
+        foreach (int i in new[] { pl.Current, pl.Previous })
+            if (i >= 0 && i < pl.Project.Scenes.Count)
+                foreach (var l in pl.Project.Scenes[i].Layers)
+                    if (!l.Off && FxAt(l, "strobeIntensity", time, bands) > 0) total += Math.Clamp(FxAt(l, "strobeRate", time, bands), 0, maxHz);
+        return total;
+    }
+
+    /// <summary>A layer's effect value now (off = its default).</summary>
+    float Fx(Picture pic, string n, AudioAnalyzer audio) => FxAt(pic, n, Time, audio.Bands);
+
+    public static float FxAt(Picture pic, string n, double time, AudioBands bands)
+    {
+        var d = EffectDefs.Get(n);
+        var ps = pic.Effects[n];
+        return ps.Off ? d.Default : ps.Mod.Apply(ps.Value[0], d.Min, d.Max, time, bands);
+    }
+
+    void DrawPicture(Picture? scene, double time, float dt, Target target, AudioAnalyzer audio, uint below = 0)
     {
         var p = scene == null ? null : Get(scene.Shader);
         // videos first: Android draws its frame into a texture with its own framebuffer
@@ -317,6 +443,7 @@ public sealed unsafe class Renderer : IDisposable
                     IsfType.Audio => (waveTex, audio.Wave.Length, 1),
                     IsfType.AudioFFT => (fftTex, audio.Spectrum.Length, 1),
                     _ when vid != null => (vid.Texture, vid.Width, vid.Height),
+                    _ when below != 0 && i.Name == Layer.Below => (below, w, h), // filter layer: what is below it
                     _ => (blackTex, 1, 1),
                 };
                 gl.ActiveTexture(TextureUnit.Texture0 + unit);
@@ -376,12 +503,17 @@ public sealed unsafe class Renderer : IDisposable
         var d = EffectDefs.Get(n);
         var sc = pl.Project.Scenes;
         if (pl.Current < 0 || pl.Current >= sc.Count) return d.Default;
-        float V(Scene s) { var ps = s.Effects[n]; return ps.Off ? d.Default : ps.Mod.Apply(ps.Value[0], d.Min, d.Max, Time, audio.Bands); }
+        float V(Scene s) => Fx(s, n, audio);
         float cur = V(sc[pl.Current]);
         if (pl.Previous < 0 || pl.Previous >= sc.Count) return cur;
         float prev = V(sc[pl.Previous]);
         return prev + (cur - prev) * pl.Fade;
     }
+
+    /// <summary>The scene strobe's (or the auto / held burst's) flashes per second, before the safety scaling.</summary>
+    float SceneStrobeRate(Player player, AudioAnalyzer audio, float maxHz) =>
+        autoStrobe.Active || StrobeHeld ? Math.Clamp(autoStrobe.Flash(player.Project.AutoStrobe).Rate, 0.1f, maxHz)
+        : Fx(player, audio, "strobeIntensity") > 0 ? Math.Clamp(Fx(player, audio, "strobeRate"), 0, maxHz) : 0;
 
     void DrawPost(Player player, AudioAnalyzer audio, float dt, float mixB, float maxHz)
     {
@@ -393,6 +525,7 @@ public sealed unsafe class Renderer : IDisposable
         Bind(1, mixB > 0 ? sceneB.Tex : sceneA.Tex, "sceneB");
         Bind(2, pong.Tex, "prevOut");
         gl.Uniform1(post.Loc(gl, "mixB"), mixB);
+        gl.Uniform1(post.Loc(gl, "layer"), 0f);
         gl.Uniform2(post.Loc(gl, "RENDERSIZE"), (float)w, (float)h);
         foreach (var d in EffectDefs.All)
             if (!d.Name.StartsWith("strobe")) gl.Uniform1(post.Loc(gl, d.Name), E(d.Name));
@@ -400,9 +533,9 @@ public sealed unsafe class Renderer : IDisposable
         // phase is integrated so an audio-modulated rate doesn't jump around
         // auto strobe bursts and the remote's "hold to strobe" use the auto strobe's own flash settings,
         // otherwise the scene's strobe. Auto bursts never start while the scene strobe is on.
-        var a = player.Project.AutoStrobe;
+        var a = autoStrobe.Flash(player.Project.AutoStrobe);
         bool burst = autoStrobe.Active || StrobeHeld;
-        float rate = burst ? Math.Clamp(a.Rate, 0.1f, maxHz) : Math.Clamp(E("strobeRate"), 0, maxHz);
+        float rate = SceneStrobeRate(player, audio, maxHz) * strobeScale;
         float duty = burst ? Math.Clamp(a.Duty, 0.05f, 0.95f) : E("strobeDuty");
         float intensity = burst ? Math.Clamp(a.Intensity, 0, 1) : E("strobeIntensity");
         float mode = burst ? a.Mode : MathF.Round(E("strobeMode"));
@@ -430,7 +563,7 @@ public sealed unsafe class Renderer : IDisposable
     void EnsureSize(int width, int height)
     {
         if (width == w && height == h) return;
-        foreach (var t in new[] { sceneA, sceneB, ping, pong })
+        foreach (var t in new[] { sceneA, sceneB, ping, pong, layerRaw, layerFx, spare })
             if (t.Fbo != 0) { gl.DeleteFramebuffer(t.Fbo); gl.DeleteTexture(t.Tex); }
         w = width;
         h = height;
@@ -438,6 +571,9 @@ public sealed unsafe class Renderer : IDisposable
         sceneB = MakeTarget(true);
         ping = MakeTarget(false);
         pong = MakeTarget(false);
+        layerRaw = MakeTarget(true);
+        layerFx = MakeTarget(false);
+        spare = MakeTarget(true);
     }
 
     // ---- how much the playing scene moves (Scene.Motion, the Auto DJ's guess of its intensity) ----
@@ -567,7 +703,9 @@ public sealed unsafe class Renderer : IDisposable
         ReleaseMedia();
         Reload(); // also the pass buffers
         gl.DeleteProgram(post.Id);
-        foreach (var t in new[] { sceneA, sceneB, ping, pong, probe })
+        gl.DeleteProgram(blend.Id);
+        foreach (var s in layerStates.Values) s.Free(gl);
+        foreach (var t in new[] { sceneA, sceneB, ping, pong, probe, layerRaw, layerFx, spare })
             if (t.Fbo != 0) { gl.DeleteFramebuffer(t.Fbo); gl.DeleteTexture(t.Tex); }
         gl.DeleteTexture(waveTex);
         gl.DeleteTexture(fftTex);

@@ -2,6 +2,63 @@ namespace Visual.Core;
 
 public sealed record EffectDef(string Name, string Label, float Min, float Max, float Default, string[]? Labels = null);
 
+/// <summary>Mixes a layer (premultiplied alpha) over what is below it; mode = (int)BlendMode. Formulas as in CSS / Photoshop.</summary>
+public static class Blends
+{
+    public static string Fragment(string header) => header + """
+        uniform sampler2D below;
+        uniform sampler2D over;
+        uniform int mode;
+        varying vec2 isf_FragNormCoord;
+
+        float lum(vec3 c) { return dot(c, vec3(0.3, 0.59, 0.11)); }
+        vec3 clipColor(vec3 c) {
+            float l = lum(c), n = min(min(c.r, c.g), c.b), x = max(max(c.r, c.g), c.b);
+            if (n < 0.0) c = l + (c - l) * l / max(l - n, 1e-5);
+            if (x > 1.0) c = l + (c - l) * (1.0 - l) / max(x - l, 1e-5);
+            return c;
+        }
+        vec3 setLum(vec3 c, float l) { return clipColor(c + (l - lum(c))); }
+        float sat(vec3 c) { return max(max(c.r, c.g), c.b) - min(min(c.r, c.g), c.b); }
+        vec3 setSat(vec3 c, float s) {
+            float n = min(min(c.r, c.g), c.b), x = max(max(c.r, c.g), c.b);
+            return x > n ? (c - n) * s / (x - n) : vec3(0.0);
+        }
+        vec3 softLight(vec3 b, vec3 s) {
+            vec3 d = mix(sqrt(b), ((16.0 * b - 12.0) * b + 4.0) * b, step(b, vec3(0.25)));
+            return mix(b + (2.0 * s - 1.0) * (d - b), b - (1.0 - 2.0 * s) * b * (1.0 - b), step(s, vec3(0.5)));
+        }
+        vec3 hardLight(vec3 b, vec3 s) { return mix(1.0 - 2.0 * (1.0 - b) * (1.0 - s), 2.0 * b * s, step(s, vec3(0.5))); }
+
+        vec3 blend(vec3 b, vec3 s) {
+            if (mode == 1) return min(b + s, 1.0);
+            if (mode == 2) return max(b - s, 0.0);
+            if (mode == 3) return b * s;
+            if (mode == 4) return b + s - b * s;
+            if (mode == 5) return hardLight(s, b); // overlay = hard light with the two swapped
+            if (mode == 6) return softLight(b, s);
+            if (mode == 7) return hardLight(b, s);
+            if (mode == 8) return abs(b - s);
+            if (mode == 9) return b + s - 2.0 * b * s;
+            if (mode == 10) return max(b, s);
+            if (mode == 11) return min(b, s);
+            if (mode == 12) return min(b / max(1.0 - s, 1e-5), 1.0);
+            if (mode == 13) return 1.0 - min((1.0 - b) / max(s, 1e-5), 1.0);
+            if (mode == 14) return setLum(setSat(s, sat(b)), lum(b));
+            if (mode == 15) return setLum(s, lum(b));
+            if (mode == 16) return setLum(b, lum(s));
+            return s;
+        }
+
+        void main() {
+            vec3 b = texture2D(below, isf_FragNormCoord).rgb;
+            vec4 o = texture2D(over, isf_FragNormCoord);
+            vec3 s = o.a > 0.0 ? clamp(o.rgb / o.a, 0.0, 1.0) : vec3(0.0);
+            gl_FragColor = vec4(mix(b, clamp(blend(b, s), 0.0, 1.0), o.a), 1.0);
+        }
+        """;
+}
+
 /// <summary>Global post-processing applied to whatever the scene shaders draw.</summary>
 public static class EffectDefs
 {
@@ -65,6 +122,7 @@ public static class EffectDefs
         uniform sampler2D sceneB;
         uniform sampler2D prevOut;
         uniform float mixB;
+        uniform float layer; // 1 = a layer: opacity, mask and its shader's alpha go to the alpha (premultiplied), for the blend
         uniform vec2 RENDERSIZE;
         uniform float brightness, contrast, saturation, hue, zoom, rotation, kaleido, chroma, vignette, feedback, tint, tintHue, opacity, strobe, strobeMode, strobeHue, maskX, maskY, maskW, maskH, maskSoft;
         varying vec2 isf_FragNormCoord;
@@ -106,13 +164,15 @@ public static class EffectDefs
             c = max(c, texture2D(prevOut, (isf_FragNormCoord - 0.5) * 0.99 + 0.5).rgb * feedback);
             c *= 1.0 - vignette * smoothstep(0.2, 0.8, length(isf_FragNormCoord - 0.5));
             c = mix(c, dot(c, vec3(0.299, 0.587, 0.114)) * pure(tintHue), tint);
-            c *= opacity;
+            if (layer < 0.5) c *= opacity;
             vec3 s = strobeMode < 0.5 ? vec3(1.0) : (strobeMode < 1.5 ? vec3(0.0) : (strobeMode < 2.5 ? 1.0 - c : pure(strobeHue)));
             // mask: d < 0 inside the rectangle; the soft edge fades inward over maskSoft
             vec2 d = abs(isf_FragNormCoord - vec2(maskX, maskY)) - 0.5 * vec2(maskW, maskH);
             vec2 m = clamp(-d / max(maskSoft, 0.0001), 0.0, 1.0);
             m = m * m * (3.0 - 2.0 * m);
-            gl_FragColor = vec4(clamp(mix(c, s, strobe), 0.0, 1.0) * m.x * m.y, 1.0);
+            c = clamp(mix(c, s, strobe), 0.0, 1.0);
+            float a = layer < 0.5 ? 1.0 : clamp(texture2D(sceneA, uv).a, 0.0, 1.0) * opacity * m.x * m.y;
+            gl_FragColor = layer < 0.5 ? vec4(c * m.x * m.y, 1.0) : vec4(c * a, a);
         }
         """;
 }

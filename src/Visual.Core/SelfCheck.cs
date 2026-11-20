@@ -31,6 +31,13 @@ public static class SelfCheck
             "ISF: shader de vértices (precisión antes de los uniforms)");
 
         var bands = new AudioBands();
+        // ease In: Rebotar plays it backwards (1.5 s = 0.5 back = 1.25); Rebotar invertido comes down with the same shape (10 - 1.25)
+        Near(new Modifier { Kind = ModKind.Linear, Speed = 1, Ease = Ease.In, Mode = LinearMode.PingPong }.Apply(0, 0, 10, 1.5, new AudioBands()), 1.25f);
+        var mi = new Modifier { Kind = ModKind.Linear, Speed = 1, Ease = Ease.In, Mode = LinearMode.Mirror };
+        Near(mi.Apply(0, 0, 10, 0.5, new AudioBands()), 1.25f);
+        Near(mi.Apply(0, 0, 10, 1.5, new AudioBands()), 8.75f);
+        Near(mi.Apply(0, 0, 10, 2.5, new AudioBands()), 1.25f);
+        Check(MathF.Abs(mi.Apply(0, 0, 10, 0.9999, new AudioBands()) - mi.Apply(0, 0, 10, 1.0001, new AudioBands())) < 0.01f, "rebotar invertido: sin salto arriba");
         var pp = new Modifier { Kind = ModKind.Linear, Speed = 1, Mode = LinearMode.PingPong };
         Near(pp.Apply(0, 0, 10, 0.5, bands), 5);  // Speed = range sweeps per second
         Near(pp.Apply(0, 0, 10, 1.0, bands), 10);
@@ -49,6 +56,13 @@ public static class SelfCheck
         Near(rl.Apply(3, 0, 10, 0.5, bands), 5);                                                        // then goes down: 3 -> 2, wraps to 6 -> 5
         Near(new Modifier { Kind = ModKind.Audio, Amount = 1, Gain = 2, Invert = true }.Apply(10, 0, 10, 0, bands), 0); // louder = lower
         Near(new Modifier { Kind = ModKind.Audio, Amount = 1, Gain = 2, To = 0.5f }.Apply(0, 0, 10, 0, bands), 5);
+        // audio: From = 0 %, To = 100 %, Intensity scales inside; the slider value doesn't matter
+        Near(new Modifier { Kind = ModKind.Audio, Amount = 1, Gain = 2, From = 0.5f, To = 0.6f }.Apply(9, 0, 10, 0, bands), 6);
+        Near(new Modifier { Kind = ModKind.Audio, Amount = 0.5f, Gain = 2, From = 0.5f, To = 0.6f }.Apply(0, 0, 10, 0, bands), 5.5f);
+        Near(new Modifier { Kind = ModKind.Audio, Amount = 1, Threshold = 0.9f, From = 0.5f, To = 0.6f }.Apply(9, 0, 10, 0, bands), 5); // silence rests at From
+        Near(new Modifier { Kind = ModKind.Audio, Amount = -1, Threshold = 0.9f, From = 0.5f, To = 0.6f }.Apply(0, 0, 10, 0, bands), 6); // negative rests at To
+        Near(new Modifier { Kind = ModKind.Audio, Amount = -0.5f, Gain = 2, From = 0.5f, To = 0.6f }.Apply(0, 0, 10, 0, bands), 5.5f);
+        CurvesCheck(bands);
 
         AutoStrobeCheck();
         EffectsCheck();
@@ -56,6 +70,8 @@ public static class SelfCheck
         NetAudioCheck();
         MusicCheck();
 
+        Check(Renderer.InternalSize(1920, 1080, 0.5f) == (960, 540) && Renderer.InternalSize(1920, 1080, 9) == (1920, 1080)
+              && Renderer.InternalSize(1, 1, 0.35f) == (1, 1) && Renderer.InternalSize(800, 600, float.NaN) == (800, 600), "resolución interna");
         Check(Renderer.Fit("full", 5, 5, 5, 5, 1920, 1080) == (0, 0, 1920, 1080), "lienzo completo");
         Check(Renderer.Fit("4:3", 0, 0, 0, 0, 1920, 1080) == (240, 0, 1440, 1080), "lienzo 4:3 centrado");
         Check(Renderer.Fit("16:9", 0, 0, 0, 0, 1080, 1920) == (0, 656, 1080, 608), "lienzo 16:9 en pantalla vertical");
@@ -74,11 +90,43 @@ public static class SelfCheck
         Check(BandOf(100) == 0, "100 Hz -> graves");
         Check(BandOf(1000) == 1, "1 kHz -> medios");
         Check(BandOf(8000) == 2, "8 kHz -> agudos");
+        Check(BandOf(1800) == 1 && BandOf(2500) == 2, "corte medios/agudos en 2 kHz");
+        AnalyzerCheck();
+    }
+
+    static void CurvesCheck(AudioBands bands)
+    {
+        Check(Curves.Names.Length == Enum.GetValues<Ease>().Length, "curvas: un nombre por curva");
+        foreach (var e in Enum.GetValues<Ease>())
+        {
+            var m = new Modifier { Kind = ModKind.Linear, Speed = 0.37f, Ease = e, From = 0.2f, To = 0.7f };
+            foreach (var mode in Enum.GetValues<LinearMode>())
+                for (int i = 0; i <= 200; i++)
+                {
+                    m.Mode = mode;
+                    float v = m.Apply(4, 0, 10, i * 0.05, bands);
+                    Check(v >= 2 - 1e-4f && v <= 7 + 1e-4f, $"curva {e} {mode}: dentro de Desde-Hasta ({v})");
+                }
+            m.Mode = LinearMode.Loop;
+            if (Curves.Rising(e))
+                foreach (bool inv in new[] { false, true })
+                    foreach (float start in new[] { 2f, 3.3f, 5f, 6.9f })
+                    {
+                        m.Invert = inv;
+                        float v0 = m.Apply(start, 0, 10, 0, bands);
+                        Check(e == Ease.Steps ? MathF.Abs(v0 - start) <= 5f / 3 + 1e-3f : MathF.Abs(v0 - start) < 1e-3f, $"curva {e}: arranca en el slider ({start} -> {v0})");
+                    }
+            if (e is not (Ease.Wave or Ease.RandomSteps or Ease.RandomSmooth or Ease.Bounce or Ease.Back or Ease.Elastic))
+                Check(Math.Abs(Curves.Of(e, 4, 0)) < 1e-9 && Math.Abs(Curves.Of(e, 4, 1) - 1) < 1e-9, $"curva {e}: de 0 a 1");
+        }
+        var st = new Modifier { Kind = ModKind.Linear, Speed = 1, Ease = Ease.Steps, Steps = 4 };
+        Check(Enumerable.Range(0, 100).Select(i => st.Apply(0, 0, 9, i * 0.01, bands)).Distinct().Count() == 4, "escalones: 4 valores");
+        Check(Math.Abs(Curves.Of(Ease.Back, 4, 0.5) - 0.5) < 1e-6 && Curves.Of(Ease.Elastic, 4, 1) < 1, "pasarse y elástico achicados");
     }
 
     static void AutoStrobeCheck()
     {
-        var c = new AutoStrobe { Enabled = true, Probability = 100, Duration = 1, Cooldown = 5, Threshold = 0.5f };
+        var c = new AutoStrobe { Enabled = true, Probability = 100, Cooldown = 5, Threshold = 0.5f, Configs = [new StrobeConfig { Duration = 1 }] };
         var r = new AutoStrobeRunner(new Random(1));
         var b = new AudioBands();
         bool Step(float level, float dt = 0.1f) { b.Raw[0] = level; return r.Update(c, b, dt, 3); }
@@ -117,6 +165,35 @@ public static class SelfCheck
         r3.Update(c, b, 0.1f, 3);
         Check(r3.Active, "autostrobe: arranca sin bloqueo");
         Check(!r3.Update(c, b, 0.1f, 3, blocked: true) && !r3.Active, "autostrobe: se corta sin pasar de escena");
+
+        // several configurations: in order, at random (never twice in a row, skipping the ones out of the rotation)
+        var m = new AutoStrobe { Enabled = true, Probability = 100, Cooldown = 0, Threshold = 0.5f,
+            Configs = [new() { Duration = 0.05f }, new() { Duration = 0.05f, NextScene = true }, new() { Duration = 0.05f }] };
+        var rm = new AutoStrobeRunner(new Random(3));
+        int Fire() { b.Raw[0] = 0; rm.Update(m, b, 0.1f, 3); b.Raw[0] = 0.9f; rm.Update(m, b, 0.1f, 3); return rm.Active ? rm.Current : -9; }
+        Check(string.Join(",", Enumerable.Range(0, 4).Select(_ => Fire())) == "0,1,2,0", "autostrobe: configuraciones en orden");
+        Fire();
+        b.Raw[0] = 0;
+        Check(rm.Update(m, b, 0.1f, 3) && rm.Ended(m)?.NextScene == true, "autostrobe: pasar de escena es por configuración");
+        Check(rm.Flash(m) == m.Configs[rm.Upcoming(m)] && rm.Upcoming(m) == 2, "autostrobe: el botón usa la próxima");
+        m.Shuffle = true;
+        m.Configs.Add(new() { Duration = 0.05f, On = false });
+        var seq = Enumerable.Range(0, 60).Select(_ => Fire()).ToList();
+        Check(seq.Zip(seq.Skip(1)).All(z => z.First != z.Second) && seq.All(x => x is >= 0 and <= 2) && seq.Distinct().Count() == 3,
+            "autostrobe: al azar sin repetir y salteando las inactivas");
+        foreach (var x in m.Configs) x.On = false;
+        b.Raw[0] = 0; rm.Update(m, b, 0.1f, 3); rm.Update(m, b, 0.1f, 3);
+        b.Raw[0] = 0.9f;
+        rm.Update(m, b, 0.1f, 3);
+        Check(!rm.Active && rm.Upcoming(m) == -1, "autostrobe: sin configuraciones activas no dispara");
+
+        // projects saved with one configuration; save / load keeps the list
+        var op = ProjectStore.Parse("""{"Name":"v","Scenes":[],"AutoStrobe":{"Enabled":true,"Rate":2.5,"Rhythm":"Beat","NextScene":true,"Mode":3}}""").AutoStrobe;
+        Check(op.Enabled && op.Configs.Count == 1 && op.Configs[0] is { Rate: 2.5f, Rhythm: StrobeRhythm.Beat, NextScene: true, Mode: 3 } && op.Old == null,
+            "autostrobe: proyecto viejo -> una configuración");
+        op.Configs.Add(new() { Name = "b", Mode = 1 });
+        var back = ProjectStore.Parse(ProjectStore.ToJson(new Project { AutoStrobe = op })).AutoStrobe;
+        Check(back.Configs.Count == 2 && back.Configs[1] is { Name: "b", Mode: 1 } && back.Configs[0].Rate == 2.5f, "autostrobe: guardar y cargar conserva las configuraciones");
     }
 
     static void EffectsCheck()
@@ -152,6 +229,45 @@ public static class SelfCheck
         Check(p.Scenes[1].Effects["zoom"].Value[0] == 3 && p.Scenes[1].Effects["zoom"] != p.Scenes[0].Effects["zoom"], "efectos: copiar a todas");
     }
 
+    static void LayersCheck(Player pl, Func<string, System.Text.Json.Nodes.JsonObject> cmd)
+    {
+        var s = pl.Project.Scenes[0];
+        string[] sh = ["a.fs", "b.fs"];
+        Remote.Apply(cmd("""{"op":"layerAdd","scene":0,"shader":"b.fs"}"""), pl, sh);
+        Remote.Apply(cmd("""{"op":"layerAdd","scene":0,"shader":"../x.fs"}"""), pl, sh);
+        Check(s.Layers.Count == 1 && s.Layers[0].Effects.Count == EffectDefs.All.Length, "capas: agregar (con sus efectos, solo shaders de la carpeta)");
+        Remote.Apply(cmd("""{"op":"effect","scene":0,"layer":0,"name":"hue","state":{"Value":[0.75]}}"""), pl, sh);
+        Check(s.Layers[0].Effects["hue"].Value[0] == 0.75f && s.Effects["hue"].Value[0] == 0.25f, "capas: efecto de la capa no toca la base");
+        Remote.Apply(cmd("""{"op":"layerSet","scene":0,"layer":0,"blend":4,"off":true}"""), pl, sh);
+        Remote.Apply(cmd("""{"op":"layerSet","scene":0,"layer":0,"blend":99}"""), pl, sh);
+        Check(s.Layers[0] is { Blend: BlendMode.Screen, Off: true }, "capas: blend y apagar");
+        Remote.Apply(cmd("""{"op":"layerDup","scene":0,"layer":0}"""), pl, sh);
+        Check(s.Layers.Count == 2 && s.Layers[1].Effects["hue"] != s.Layers[0].Effects["hue"] && s.Layers[1].Effects["hue"].Value[0] == 0.75f, "capas: duplicar es una copia");
+        Remote.Apply(cmd("""{"op":"layerSet","scene":0,"layer":1,"shader":"a.fs","off":false}"""), pl, sh);
+        Remote.Apply(cmd("""{"op":"layerMove","scene":0,"layer":1,"to":0}"""), pl, sh);
+        Check(s.Layers[0].Shader == "a.fs" && s.Layers[1].Shader == "b.fs", "capas: orden");
+        Remote.Apply(cmd("""{"op":"media","scene":0,"layer":0,"name":"inputImage","value":{"Src":"v.mp4"}}"""), pl, sh);
+        Check(s.Layers[0].Media.ContainsKey("inputImage") && !s.Media.ContainsKey("inputImage"), "capas: video de la capa");
+        var back = ProjectStore.Parse(ProjectStore.ToJson(pl.Project)).Scenes[0];
+        Check(back.Layers.Count == 2 && back.Layers[1] is { Blend: BlendMode.Screen, Off: true } && back.Layers[1].Effects["hue"].Value[0] == 0.75f, "capas: guardar y cargar");
+        Check(ProjectStore.Parse("""{"Name":"v","Scenes":[{"Shader":"a.fs","Name":"","Media":{},"Params":{},"Effects":{}}],"AutoStrobe":{}}""").Scenes[0].Layers.Count == 0, "capas: proyecto viejo sin capas");
+        bool bad = false;
+        try { ProjectStore.Parse("""{"Name":"v","Scenes":[{"Shader":"a.fs","Name":"","Media":{},"Params":{},"Effects":{},"Layers":[null]}],"AutoStrobe":{}}"""); }
+        catch (InvalidDataException) { bad = true; }
+        Check(bad, "capas: rechaza una capa vacía");
+
+        // safety: strobes of the scene and its layers count together
+        foreach (var l in s.Layers) { l.Off = false; l.Effects["strobeRate"].Value[0] = 3; }
+        float total = Renderer.StrobeTotal(pl, 0, new AudioBands(), EffectDefs.SafeStrobeHz, 1);
+        Check(total == 7, "capas: suma de strobes");
+        s.Layers[1].Effects["strobeIntensity"].Value[0] = 0;
+        Check(Renderer.StrobeTotal(pl, 0, new AudioBands(), EffectDefs.SafeStrobeHz, 0) == 3, "capas: strobe sin intensidad no cuenta");
+        Remote.Apply(cmd("""{"op":"layerRemove","scene":0,"layer":0}"""), pl, sh);
+        Remote.Apply(cmd("""{"op":"layerRemove","scene":0,"layer":5}"""), pl, sh);
+        Check(s.Layers.Count == 1 && s.Layers[0].Shader == "b.fs", "capas: quitar");
+        s.Layers.Clear();
+    }
+
     static void RemoteCheck()
     {
         var pl = new Player();
@@ -178,6 +294,7 @@ public static class SelfCheck
         pl.Project.EnsureEffects();
         Remote.Apply(Cmd("""{"op":"effect","scene":0,"name":"hue","state":{"Value":[0.25]}}"""), pl, []);
         Check(pl.Project.Scenes[0].Effects["hue"].Value[0] == 0.25f, "remoto: efecto de la escena");
+        LayersCheck(pl, Cmd);
 
         using var srv = new RemoteServer();
         srv.Start(0, "secreto", loopbackOnly: true);
@@ -270,9 +387,79 @@ public static class SelfCheck
         for (int i = 0; i < buf.Length; i++) buf[i] = 0.5f * MathF.Sin(2 * MathF.PI * hz * i / 48000);
         a.Push(buf);
         for (int i = 0; i < 10; i++) a.Update(1 / 60f);
-        var r = a.Bands.Raw;
+        var r = a.Bands.Raw[..3];
         return Array.IndexOf(r, r.Max());
     }
+
+    /// <summary>Feeds <paramref name="frames"/> frames at 60 fps of a signal (sample index -> value) and returns the analyzer.</summary>
+    static AudioAnalyzer Feed(Func<int, float> sig, int frames, AudioAnalyzer? a = null)
+    {
+        a ??= new AudioAnalyzer { SampleRate = 48000 };
+        var buf = new float[800];
+        for (int fr = 0, n = 0; fr < frames; fr++)
+        {
+            for (int i = 0; i < buf.Length; i++, n++) buf[i] = sig(n);
+            a.Push(buf);
+            a.Update(1 / 60f);
+        }
+        return a;
+    }
+
+    static void AnalyzerCheck()
+    {
+        // pink-like noise (equal-amplitude sines, evenly spaced per octave): the bands differ only by the music tilt
+        var rnd = new Random(5);
+        var pink = Enumerable.Range(0, 200).Select(i => (Hz: 20 * Math.Pow(2, i / 22.0), Ph: rnd.NextDouble() * 6.283)).Where(x => x.Hz < 10000).ToArray();
+        var pa = Feed(n => (float)(0.02 * pink.Sum(x => Math.Sin(2 * Math.PI * x.Hz * n / 48000 + x.Ph))), 20);
+        var r = pa.Bands.Raw;
+        for (int b = 1; b < 3; b++)
+        {
+            float ratio = r[b] / r[0] / AudioAnalyzer.Tilt[b];
+            Check(ratio is > 0.75f and < 1.33f, $"bandas: ruido rosa parejo ({BandNamesCheck[b]} {ratio:0.00})");
+        }
+
+        // a held note with harmonics: melody up, note = its pitch; 220 < 440 < 880
+        float NoteOf(float hz, out float melody)
+        {
+            var a = Feed(n => (float)Enumerable.Range(1, 4).Sum(h => 0.3 / h * Math.Sin(2 * Math.PI * hz * h * n / 48000)), 120);
+            melody = a.Bands.Raw[(int)Band.Melody];
+            return a.Bands.Raw[(int)Band.Note];
+        }
+        float n440 = NoteOf(440, out float mel), n220 = NoteOf(220, out _), n880 = NoteOf(880, out _);
+        float semis = 12 * MathF.Log2(AudioAnalyzer.NoteHi / AudioAnalyzer.NoteLo), want = 12 * MathF.Log2(440 / AudioAnalyzer.NoteLo) / semis;
+        Check(MathF.Abs(n440 - want) < 1 / semis, $"nota: La 440 ({n440 * semis:0.0} semitonos, esperado {want * semis:0.0})");
+        Check(MathF.Abs(n220 - (want - 12 / semis)) < 1 / semis && MathF.Abs(n880 - (want + 12 / semis)) < 1 / semis, $"nota: octavas ({n220 * semis:0.0} / {n880 * semis:0.0})");
+        Check(mel > 0.2f, $"melodía: sube con una nota sostenida ({mel:0.00})");
+
+        // drum hits (short noise bursts, as loud as the note): the melody barely moves
+        var nr = new Random(9);
+        float peakMel = 0;
+        var da = new AudioAnalyzer { SampleRate = 48000 };
+        for (int hit = 0; hit < 6; hit++)
+        {
+            Feed(n => n < 600 ? (float)(nr.NextDouble() * 2 - 1) * 0.6f : 0, 1, da);
+            for (int i = 0; i < 14; i++) { Feed(_ => 0, 1, da); peakMel = MathF.Max(peakMel, da.Bands.Raw[(int)Band.Melody]); }
+        }
+        // a note cut on and off 4 times a second: the melody averages it instead of jumping
+        var ca = new AudioAnalyzer { SampleRate = 48000 };
+        float lo = float.MaxValue, hi = 0;
+        for (int fr = 0; fr < 240; fr++)
+        {
+            Feed(n => (fr / 8) % 2 == 0 ? (float)Enumerable.Range(1, 4).Sum(h => 0.3 / h * Math.Sin(2 * Math.PI * 440 * h * (n + fr * 800) / 48000)) : 0, 1, ca);
+            if (fr >= 120) { float m = ca.Bands.Raw[(int)Band.Melody]; lo = MathF.Min(lo, m); hi = MathF.Max(hi, m); }
+        }
+        Check(hi - lo < hi * 0.5f, $"melodía: se mueve suave ({lo:0.00}..{hi:0.00})");
+
+        Check(peakMel < mel * 0.3f, $"melodía: ignora los golpes ({peakMel:0.00} vs nota {mel:0.00})");
+
+        var sa = Feed(n => 0.3f * MathF.Sin(2 * MathF.PI * 1000 * n / 48000), 20);
+        float mid = sa.Bands.Raw[1];
+        sa.Sensitivity = [1, 2, 1, 1];
+        Feed(n => 0.3f * MathF.Sin(2 * MathF.PI * 1000 * (n + 16000) / 48000), 20, sa);
+        Check(MathF.Abs(sa.Bands.Raw[1] / mid - 2) < 0.1f, "bandas: sensibilidad x2");
+    }
+
+    static readonly string[] BandNamesCheck = ["graves", "medios", "agudos"];
 
     static void NetAudioCheck()
     {

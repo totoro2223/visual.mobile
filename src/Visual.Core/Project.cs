@@ -3,9 +3,45 @@ using System.Text.Json.Serialization;
 
 namespace Visual.Core;
 
-public sealed class Scene
+/// <summary>A shader with its settings: the scene's base picture, or one of its layers.</summary>
+public abstract class Picture
 {
     public string Shader { get; set; } = "";   // file name inside the shader folder (portable between PC and TV)
+    /// <summary>Video / picture for each ISF image input, by input name.</summary>
+    public Dictionary<string, SceneMedia> Media { get; set; } = [];
+    public Dictionary<string, ParamState> Params { get; set; } = [];
+    public Dictionary<string, ParamState> Effects { get; set; } = [];
+
+    public virtual void EnsureEffects()
+    {
+        foreach (var d in EffectDefs.All)
+            if (!Effects.TryGetValue(d.Name, out var ps) || ps.Value.Length == 0) Effects[d.Name] = new ParamState { Value = [d.Default] };
+    }
+
+    /// <summary>Settings readable (not null) after loading an outside file.</summary>
+    internal bool Valid => Shader != null && Media != null && Params != null && Effects != null
+                           && Params.Values.Concat(Effects.Values).All(ps => ps?.Value != null && ps.Mod != null);
+}
+
+public enum BlendMode { Normal, Add, Subtract, Multiply, Screen, Overlay, SoftLight, HardLight, Difference, Exclusion, Lighten, Darken, Dodge, Burn, Hue, Color, Luminosity }
+
+/// <summary>Drawn over what is below it in the scene, with its own effects; a filter shader (input "inputImage") gets that picture.</summary>
+public sealed class Layer : Picture
+{
+    public static readonly string[] BlendNames = ["Normal", "Sumar", "Restar", "Multiplicar", "Pantalla", "Superponer", "Luz suave", "Luz fuerte",
+        "Diferencia", "Exclusión", "Aclarar", "Oscurecer", "Sobreexponer", "Subexponer", "Tono", "Color", "Luminosidad"];
+    /// <summary>The ISF input a filter layer reads what is below from (unless a video is set on it).</summary>
+    public const string Below = "inputImage";
+
+    public BlendMode Blend { get; set; }
+    /// <summary>Hidden: draws nothing but keeps its settings.</summary>
+    public bool Off { get; set; }
+
+    public Layer Clone() => JsonSerializer.Deserialize<Layer>(JsonSerializer.Serialize(this))!;
+}
+
+public sealed class Scene : Picture
+{
     /// <summary>Optional name to tell scenes apart (the same shader used several times); empty = the shader's.</summary>
     public string Name { get; set; } = "";
     public float Duration { get; set; } = 20;  // seconds, 0 = manual
@@ -13,10 +49,8 @@ public sealed class Scene
     public int Intensity { get; set; }
     /// <summary>How much the picture moves, measured while it plays (0..1); -1 = not measured yet.</summary>
     public float Motion { get; set; } = -1;
-    /// <summary>Video / picture for each ISF image input, by input name.</summary>
-    public Dictionary<string, SceneMedia> Media { get; set; } = [];
-    public Dictionary<string, ParamState> Params { get; set; } = [];
-    public Dictionary<string, ParamState> Effects { get; set; } = [];
+    /// <summary>Drawn over the base shader in order (first = right above it), before the scene's effects.</summary>
+    public List<Layer> Layers { get; set; } = [];
     /// <summary>Own canvas for this scene; null = the device's (global) one.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public SceneCanvas? Canvas { get; set; }
@@ -31,10 +65,11 @@ public sealed class Scene
     [JsonIgnore] public int Level => Intensity is >= 1 and <= 3 ? Intensity : MeasuredLevel;
     [JsonIgnore] public int MeasuredLevel => Motion < 0 ? 2 : Motion < SoftMotion ? 1 : Motion < StrongMotion ? 2 : 3;
 
-    public void EnsureEffects()
+    public override void EnsureEffects()
     {
-        foreach (var d in EffectDefs.All)
-            if (!Effects.TryGetValue(d.Name, out var ps) || ps.Value.Length == 0) Effects[d.Name] = new ParamState { Value = [d.Default] };
+        base.EnsureEffects();
+        Layers ??= [];
+        foreach (var l in Layers) l.EnsureEffects();
     }
 }
 
@@ -79,6 +114,7 @@ public sealed class Project
             s.EnsureEffects();
         }
         Effects = null;
+        AutoStrobe.Ensure();
     }
 
     public void CopyEffects(Scene from)
@@ -112,8 +148,7 @@ public sealed class ProjectStore(string folder)
         try { p = JsonSerializer.Deserialize<Project>(json, Json); }
         catch (Exception e) when (e is JsonException or NotSupportedException or InvalidOperationException) { throw new InvalidDataException("No es un proyecto válido: " + e.Message); }
         if (p?.Scenes == null || p.AutoStrobe == null || p.Name == null
-            || p.Scenes.Any(s => s?.Shader == null || s.Name == null || s.Media == null || s.Params == null || s.Effects == null
-                                 || s.Params.Values.Concat(s.Effects.Values).Any(ps => ps?.Value == null || ps.Mod == null)))
+            || p.Scenes.Any(s => s?.Name == null || !s.Valid || s.Layers?.All(l => l?.Valid == true) == false))
             throw new InvalidDataException("No es un proyecto válido");
         p.AutoDj ??= new();
         p.EnsureEffects();

@@ -255,7 +255,8 @@ public static class Remote
         Converters = { new JsonStringEnumConverter() },
     };
 
-    public static string State(Player pl, IsfShader? isf, string loaded, string[] projects, string[] shaders, string[] media, AudioAnalyzer audio, float maxHz, bool strobe, object? device = null, AutoDjRunner? dj = null)
+    public static string State(Player pl, IsfShader? isf, string loaded, string[] projects, string[] shaders, string[] media, AudioAnalyzer audio, float maxHz, bool strobe, object? device = null, AutoDjRunner? dj = null,
+        Func<string, IsfShader?>? shaderOf = null, AutoStrobeRunner? auto = null)
     {
         var p = pl.Project;
         var scene = pl.Current >= 0 && pl.Current < p.Scenes.Count ? p.Scenes[pl.Current] : null;
@@ -269,21 +270,34 @@ public static class Remote
             Shaders = shaders,
             pl.Current,
             pl.SceneTime,
-            Scenes = p.Scenes.Select(s => new { s.Shader, s.Title, s.Duration, s.Intensity, s.Level, Fx = EffectDefs.ActiveLabels(s.Effects) }),
+            Scenes = p.Scenes.Select(s => new { s.Shader, s.Title, s.Duration, s.Intensity, s.Level, Fx = EffectDefs.ActiveLabels(s.Effects), Layers = s.Layers.Count }),
             Name = scene?.Name,
             Media = scene?.Media,
             MediaFiles = media,
             p.Shuffle,
             p.Crossfade,
             p.CrossfadeSeconds,
-            Inputs = (isf?.Inputs ?? []).Where(i => i.Type is not (IsfType.Audio or IsfType.AudioFFT))
-                .Select(i => new { i.Name, i.Label, Type = i.Type.ToString(), i.Min, i.Max, i.Values, i.Labels }),
+            Inputs = Inputs(isf),
             Params = scene?.Params,
             EffectDefs = EffectDefs.All,
             EffectDefs.StrobeModes,
             Effects = scene?.Effects,
+            Layers = scene?.Layers.Select(l =>
+            {
+                var li = l.Shader == "" ? null : shaderOf?.Invoke(l.Shader);
+                li?.EnsureParams(l.Params);
+                return new
+                {
+                    l.Shader, l.Off, l.Blend, l.Params, l.Effects, l.Media,
+                    Fx = EffectDefs.ActiveLabels(l.Effects),
+                    Filter = li?.Inputs.Any(i => i.Name == Layer.Below && i.IsTexture) == true,
+                    Inputs = Inputs(li),
+                };
+            }),
+            Layer.BlendNames,
             Canvas = scene?.Canvas,
             p.AutoStrobe,
+            AutoPlaying = auto?.Active == true ? auto.Current : -1,
             Bands = audio.Bands.Raw,
             Music = new { audio.Music.Energy, audio.Music.Bpm, audio.Music.Confidence, audio.Music.Locked, audio.Music.Silence, audio.Music.BarPhase },
             p.AutoDj,
@@ -293,6 +307,9 @@ public static class Remote
             Device = device, // host-only settings (Android: audio source, quality); null on PC
         }, Json);
     }
+
+    static object Inputs(IsfShader? isf) => (isf?.Inputs ?? []).Where(i => i.Type is not (IsfType.Audio or IsfType.AudioFFT))
+        .Select(i => new { i.Name, i.Label, Type = i.Type.ToString(), i.Min, i.Max, i.Values, i.Labels });
 
     /// <summary>Applies a command to the project/player. Returns the op when the host must handle it (strobe, open, save, new, duplicate), else null.</summary>
     public static string? Apply(JsonObject c, Player pl, string[] shaders, MusicMeter? music = null)
@@ -307,13 +324,13 @@ public static class Remote
                 if (SceneAt(p, Int(c, "scene")) is { } d) d.Duration = Math.Max(0, Float(c, "value"));
                 break;
             case "param":
-                if (SceneAt(p, Int(c, "scene")) is { } s) Replace(s.Params, Str(c, "name"), c["state"]);
+                if (PictureAt(p, c) is { } s) Replace(s.Params, Str(c, "name"), c["state"]);
                 break;
             case "effect":
-                if (SceneAt(p, Int(c, "scene")) is { } fs) Replace(fs.Effects, Str(c, "name"), c["state"]);
+                if (PictureAt(p, c) is { } fs) Replace(fs.Effects, Str(c, "name"), c["state"]);
                 break;
             case "resetEffects":
-                if (SceneAt(p, Int(c, "scene")) is { } rs) { rs.Effects.Clear(); rs.EnsureEffects(); }
+                if (PictureAt(p, c) is { } rs) { rs.Effects.Clear(); rs.EnsureEffects(); }
                 break;
             case "copyEffects":
                 if (SceneAt(p, Int(c, "scene")) is { } cs) p.CopyEffects(cs);
@@ -328,7 +345,7 @@ public static class Remote
                 if (SceneAt(p, Int(c, "scene")) is { } ns) ns.Name = Str(c, "value").Trim() is var t && t.Length > 60 ? t[..60] : t;
                 break;
             case "media": // value null = nothing in that input
-                if (SceneAt(p, Int(c, "scene")) is { } ms && Str(c, "name") is { Length: > 0 and <= 64 } input)
+                if (PictureAt(p, c) is { } ms && Str(c, "name") is { Length: > 0 and <= 64 } input)
                 {
                     if (c["value"].Deserialize<SceneMedia>(Json) is { } sm && (Media.IsUrl(sm.Src) ? sm.Src.Length <= 2000 : Media.ValidName(sm.Src)))
                         ms.Media[input] = new SceneMedia
@@ -339,6 +356,36 @@ public static class Remote
                     else if (c["value"] == null) ms.Media.Remove(input);
                 }
                 break;
+            case "layerAdd":
+                if (SceneAt(p, Int(c, "scene")) is { } las && shaders.Contains(Str(c, "shader")) && las.Layers.Count < MaxLayers)
+                {
+                    var nl = new Layer { Shader = Str(c, "shader") };
+                    nl.EnsureEffects();
+                    las.Layers.Add(nl);
+                }
+                break;
+            case "layerRemove":
+                if (SceneAt(p, Int(c, "scene")) is { } lrs && LayerAt(lrs, Int(c, "layer")) is { } rl) lrs.Layers.Remove(rl);
+                break;
+            case "layerMove":
+                if (SceneAt(p, Int(c, "scene")) is { } lms && LayerAt(lms, Int(c, "layer")) is { } ml && Int(c, "to") is var lt && lt >= 0 && lt < lms.Layers.Count)
+                {
+                    lms.Layers.Remove(ml);
+                    lms.Layers.Insert(lt, ml);
+                }
+                break;
+            case "layerDup":
+                if (SceneAt(p, Int(c, "scene")) is { } lds && LayerAt(lds, Int(c, "layer")) is { } dl && lds.Layers.Count < MaxLayers)
+                    lds.Layers.Insert(lds.Layers.IndexOf(dl) + 1, dl.Clone());
+                break;
+            case "layerSet": // only the fields sent
+                if (SceneAt(p, Int(c, "scene")) is { } lss && LayerAt(lss, Int(c, "layer")) is { } sl)
+                {
+                    if (c["shader"] != null && shaders.Contains(Str(c, "shader"))) sl.Shader = Str(c, "shader");
+                    if (c["blend"] != null && Enum.IsDefined((BlendMode)Int(c, "blend"))) sl.Blend = (BlendMode)Int(c, "blend");
+                    if (c["off"] != null) sl.Off = c["off"]!.GetValue<bool>();
+                }
+                break;
             case "intensity":
                 if (SceneAt(p, Int(c, "scene")) is { } ins) ins.Intensity = Math.Clamp(Int(c, "value"), 0, 3);
                 break;
@@ -346,7 +393,13 @@ public static class Remote
                 if (c["value"].Deserialize<AutoDj>(Json) is { } dj) p.AutoDj = new AutoDj { Enabled = dj.Enabled, Bars = Math.Clamp(dj.Bars, 1, 64), Drops = dj.Drops };
                 break;
             case "autostrobe":
-                if (c["value"].Deserialize<AutoStrobe>(Json) is { } a) p.AutoStrobe = a;
+                if (c["value"].Deserialize<AutoStrobe>(Json) is { } a)
+                {
+                    a.Old = null;
+                    if (a.Configs?.Count > AutoStrobe.MaxConfigs) a.Configs = a.Configs.Take(AutoStrobe.MaxConfigs).ToList();
+                    a.Ensure();
+                    p.AutoStrobe = a;
+                }
                 break;
             case "project":
                 p.Shuffle = c["shuffle"]?.GetValue<bool>() ?? p.Shuffle;
@@ -415,6 +468,11 @@ public static class Remote
     }
 
     static Scene? SceneAt(Project p, int i) => i >= 0 && i < p.Scenes.Count ? p.Scenes[i] : null;
+    static Layer? LayerAt(Scene s, int i) => i >= 0 && i < s.Layers.Count ? s.Layers[i] : null;
+    /// <summary>The scene, or one of its layers when the command has "layer".</summary>
+    static Picture? PictureAt(Project p, JsonObject c) =>
+        SceneAt(p, Int(c, "scene")) is not { } s ? null : c["layer"] == null ? s : LayerAt(s, Int(c, "layer"));
+    public const int MaxLayers = 16;
     static string Str(JsonObject c, string k) => c[k]?.GetValue<string>() ?? "";
     static int Int(JsonObject c, string k) => c[k]?.GetValue<int>() ?? -1;
     static float Float(JsonObject c, string k) => c[k]?.GetValue<float>() ?? 0;

@@ -70,6 +70,14 @@ h3{margin:18px 0 6px;color:var(--mut);font-size:13px;text-transform:uppercase;le
 .prow>label{flex:1 1 auto}
 .prow+.row{margin-top:2px}
 select.kind{padding:6px 8px;font-size:14px}
+.curvepick{flex:1;min-width:0}
+.curvepick button{display:flex;align-items:center;gap:10px;width:100%;text-align:left}
+svg.curve{flex:none;width:32px;height:20px;fill:none;stroke:currentColor;stroke-width:1.6;border:1px solid #444;border-radius:3px}
+.curves{display:none;flex-direction:column;gap:4px;margin-top:4px;max-height:60vh;overflow:auto}
+.curves.open{display:flex}
+.curves button.on{border-color:var(--acc);color:var(--acc)}
+details.more{margin:8px 0}
+details.more>summary{padding:10px 0;color:var(--mut)}
 button.sm.gear{padding:6px 11px;font-size:16px}
 button.sm.gear.on{background:#3a3a3a;border-color:#666}
 label>input[type=checkbox]{margin:0 8px 0 0;vertical-align:middle}
@@ -94,6 +102,7 @@ input[type=color]{width:56px;height:36px;border:0;background:none}
 .bpm i{display:inline-block;width:14px;height:14px;border-radius:50%;background:#3cc;opacity:.2;margin-right:8px}
 .bpm small{color:var(--mut)}
 #tapb{min-width:110px}
+details.playing > summary::after { content: ' · disparando'; color: #ffd84d; }
 </style>
 </head>
 <body>
@@ -108,8 +117,8 @@ input[type=color]{width:56px;height:36px;border:0;background:none}
 <div id="note" role="status"></div>
 <script>
 const K = new URLSearchParams(location.search).get('k') || '';
-const BANDS = ['Graves', 'Medios', 'Agudos'], BANDS_V = ['Bass', 'Mid', 'High'], LEVELS = ['Auto', 'Suave', 'Media', 'Fuerte'];
-const KINDS = ['Constante', 'Lineal', 'Audio'], KINDS_V = ['Constant', 'Linear', 'Audio'];
+const BANDS = ['Graves', 'Medios', 'Agudos', 'Melodía', 'Nota'], BANDS_V = ['Bass', 'Mid', 'High', 'Melody', 'Note'], LEVELS = ['Auto', 'Suave', 'Media', 'Fuerte'];
+const KINDS = ['Constante', 'Lineal', 'Audio'], KINDS_V = ['Constant', 'Linear', 'Audio'], MODES_V = ['Loop', 'PingPong', 'Mirror'];
 const m = document.getElementById('m');
 // per-phone conveniences (open cards, last tab); storage can be blocked, so never rely on it
 const store = { get: k => { try { return localStorage.getItem(k); } catch { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch {} } };
@@ -129,7 +138,7 @@ async function poll() {
     S = await r.json();
     document.getElementById('err').textContent = '';
     const s = JSON.stringify([tab, S.Project, S.Loaded, S.Projects, S.Shaders, S.Current, S.Scenes, S.Shuffle, S.Crossfade,
-      S.CrossfadeSeconds, S.Inputs, S.Params, S.Effects, S.AutoStrobe, S.AutoDj, S.MaxHz, S.Device, S.Canvas, S.Name, S.Media, S.MediaFiles]);
+      S.CrossfadeSeconds, S.Inputs, S.Params, S.Effects, S.AutoStrobe, S.AutoDj, S.MaxHz, S.Device, S.Canvas, S.Name, S.Media, S.MediaFiles, S.Layers]);
     // don't rebuild under the user's finger: wait until they stop touching / typing
     const typing = document.activeElement && document.activeElement.matches('select,input[type=number],input[type=text]');
     if (s !== sig && !busy && !typing && Date.now() - lastEdit > 1500) { sig = s; render(); }
@@ -246,6 +255,54 @@ function range(md, min, max) { // same as Modifier.Range in C#
   const f = clamp01(md.From ?? 0), t = clamp01(md.To ?? 1);
   return [min + Math.min(f, t) * (max - min), min + Math.max(f, t) * (max - min)];
 }
+// sweep curves: same as Curves in Modifiers.cs (only drawn here, for the icons)
+const EASES = ['Lineal', 'Suave', 'Acelera', 'Frena', 'Acelera fuerte', 'Frena fuerte', 'Exponencial', 'Circular', 'Ola', 'Escalones',
+  'Al azar por pasos', 'Al azar suave', 'Rebote', 'Pasarse', 'Elástico'];
+const EASES_V = ['Linear', 'Smooth', 'In', 'Out', 'InStrong', 'OutStrong', 'Expo', 'Circ', 'Wave', 'Steps', 'RandomSteps', 'RandomSmooth', 'Bounce', 'Back', 'Elastic'];
+function curve(e, steps, x) {
+  const hash = k => { const s = Math.sin(k * 12.9898 + 78.233) * 43758.5453; return s - Math.floor(s); };
+  const back = x => { const c = 1.70158 * 1.525; return x < .5 ? (2 * x) ** 2 * ((c + 1) * 2 * x - c) / 2 : ((2 * x - 2) ** 2 * ((c + 1) * (2 * x - 2) + c) + 2) / 2; };
+  const elastic = x => x <= 0 ? 0 : x >= 1 ? 1 : 2 ** (-10 * x) * Math.sin((10 * x - .75) * 2 * Math.PI / 3) + 1;
+  const norm = (f, x) => { let lo = 0, hi = 1; for (let i = 0; i <= 200; i++) { const v = f(i / 200); lo = Math.min(lo, v); hi = Math.max(hi, v); } return (f(x) - lo) / (hi - lo); };
+  const bounce = x => { const n = 7.5625, d = 2.75;
+    return x < 1 / d ? n * x * x : x < 2 / d ? n * (x -= 1.5 / d) * x + .75 : x < 2.5 / d ? n * (x -= 2.25 / d) * x + .9375 : n * (x -= 2.625 / d) * x + .984375; };
+  const u = x * steps, k = Math.floor(u), t = u - k;
+  switch (e) {
+    case 'Smooth': return .5 - .5 * Math.cos(Math.PI * x);
+    case 'In': return x ** 3;
+    case 'Out': return 1 - (1 - x) ** 3;
+    case 'InStrong': return x ** 5;
+    case 'OutStrong': return 1 - (1 - x) ** 5;
+    case 'Expo': return (2 ** (10 * x) - 1) / 1023;
+    case 'Circ': return x < .5 ? (1 - Math.sqrt(1 - 4 * x * x)) / 2 : (1 + Math.sqrt(Math.max(0, 1 - (2 - 2 * x) ** 2))) / 2;
+    case 'Wave': return .5 - .5 * Math.cos(2 * Math.PI * x);
+    case 'Steps': return Math.min(Math.floor(u), steps - 1) / (steps - 1);
+    case 'RandomSteps': return hash(k);
+    case 'RandomSmooth': { const s = t * t * (3 - 2 * t); return hash(k) + (hash(k + 1) - hash(k)) * s; }
+    case 'Bounce': return bounce(x);
+    case 'Back': return norm(back, x);
+    case 'Elastic': return norm(elastic, x);
+    default: return x;
+  }
+}
+function curveIcon(e, steps) {
+  const ns = 'http://www.w3.org/2000/svg', svg = document.createElementNS(ns, 'svg'), pl = document.createElementNS(ns, 'polyline');
+  svg.setAttribute('viewBox', '0 0 32 20');
+  svg.setAttribute('class', 'curve');
+  const pts = [];
+  for (let i = 0; i <= 40; i++) pts.push((i / 40 * 30 + 1).toFixed(1) + ',' + (19 - 18 * curve(e, steps, i / 40)).toFixed(1));
+  pl.setAttribute('points', pts.join(' '));
+  svg.append(pl);
+  return svg;
+}
+// a <select> can't show drawings: a button that opens a list of icon + name
+function curvePick(md, changed) {
+  const cur = md.Ease || 'Linear', steps = Math.min(16, Math.max(2, md.Steps ?? 4));
+  const list = el('div', { class: 'curves' });
+  const b = el('button', { class: 'sm curvebtn', onclick: () => list.classList.toggle('open') }, curveIcon(cur, steps), EASES[Math.max(0, EASES_V.indexOf(cur))]);
+  EASES_V.forEach((v, i) => list.append(el('button', { class: 'sm' + (v === cur ? ' on' : ''), onclick: () => { md.Ease = v; changed(); } }, curveIcon(v, steps), EASES[i])));
+  return el('div', { class: 'curvepick' }, b, list);
+}
 function paramEd(label, ps, min, max, labels, key, mk, opt = {}) {
   const go = () => edit(key, mk()), wrap = el('div');
   const draw = () => {
@@ -276,7 +333,10 @@ function paramEd(label, ps, min, max, labels, key, mk, opt = {}) {
         box.append(chk(md.Kind === 'Linear' ? 'Invertir (recorre al revés)' : 'Invertir (más sonido = menos valor)', !!md.Invert, b => { md.Invert = b; go(); draw(); }));
       if (md.Kind === 'Linear') box.append(
         slider('Velocidad (recorridos/s)', md.Speed, 0.001, 5, x => { md.Speed = x; go(); }, true),
-        sel('Al llegar al borde', ['Reiniciar', 'Rebotar'], md.Mode === 'PingPong' ? 1 : 0, i => { md.Mode = i ? 'PingPong' : 'Loop'; go(); }));
+        sel('Al llegar al borde', ['Reiniciar', 'Rebotar', 'Rebotar invertido'], Math.max(0, MODES_V.indexOf(md.Mode)), i => { md.Mode = MODES_V[i]; go(); }),
+        row('Curva', curvePick(md, () => { go(); draw(); })));
+      if (md.Kind === 'Linear' && /Steps|Random/.test(md.Ease || ''))
+        box.append(slider(md.Ease === 'Steps' ? 'Pasos' : 'Valores por recorrido', md.Steps ?? 4, 2, 16, x => { md.Steps = Math.round(x); go(); }));
       if (md.Kind === 'Audio') box.append(
         sel('Banda', BANDS, BANDS_V.indexOf(md.Band), i => { md.Band = BANDS_V[i]; go(); }),
         slider('Intensidad', md.Amount, -1, 1, x => { md.Amount = x; go(); }),
@@ -378,8 +438,14 @@ let beatAt = 0, beatPhase = 0, beatBpm = 0;
   requestAnimationFrame(beatLoop);
 })();
 
+const NOTES = ['Do', 'Do#', 'Re', 'Re#', 'Mi', 'Fa', 'Fa#', 'Sol', 'Sol#', 'La', 'La#', 'Si'];
+function noteName(v) { // the note band (0..1, 80..1500 Hz) as 'La 4'
+  const midi = Math.round(69 + 12 * Math.log2(80 * Math.pow(1500 / 80, v) / 440));
+  return NOTES[(midi % 12 + 12) % 12] + ' ' + (Math.floor(midi / 12) - 1);
+}
 function live() { // cheap updates every poll, no rebuild
   document.getElementById('tag').style.display = S.Strobe ? 'block' : 'none';
+  document.querySelectorAll('[data-cfg]').forEach(d => d.classList.toggle('playing', +d.dataset.cfg === S.AutoPlaying));
   const s = S.Scenes[S.Current];
   document.getElementById('now').textContent = s ? `${S.Current + 1}/${S.Scenes.length} · ${s.Title} · ${S.SceneTime.toFixed(0)} s${s.Duration > 0 ? ' / ' + s.Duration + ' s' : ''}` : 'Sin escenas';
   const pg = document.getElementById('sprog'); // the playing scene's row: "12 / 30 s" and a bar up to the change
@@ -397,7 +463,7 @@ function live() { // cheap updates every poll, no rebuild
     ds.lastChild.textContent = S.Dj.LastChange ? 'Último cambio: ' + S.Dj.LastChange : '';
   }
   const b = document.getElementById('bands');
-  if (b) b.replaceChildren(...S.Bands.map((v, i) => el('div', {}, el('small', { textContent: BANDS[i] }),
+  if (b) b.replaceChildren(...S.Bands.map((v, i) => el('div', {}, el('small', { textContent: i === 4 ? 'Nota ' + (S.Bands[3] > 0.03 ? noteName(v) : '-') : BANDS[i] }),
     el('div', { class: 'bar' }, el('i', { style: `width:${Math.min(100, v * 100)}%` })))));
   const mu = S.Music, en = document.getElementById('energy');
   if (mu && en) {
@@ -441,75 +507,120 @@ function renderScene() {
     // pictures have no value, they use S.Media
     const inputs = S.Inputs.filter(inp => (S.Params && S.Params[inp.Name]) || inp.Type === 'Image');
     if (inputs.length) card('params', 'Parámetros', 'c-param', true, s.Shader);
-    for (const inp of inputs) {
-      const ps = S.Params && S.Params[inp.Name];
-      const key = 'p:' + inp.Name, mk = () => ({ op: 'param', scene: i, name: inp.Name, state: ps }), go = () => edit(key, mk());
-      switch (inp.Type) {
-        case 'Float': add(...paramEd(inp.Label, ps, inp.Min[0], inp.Max[0], null, key, mk)); break;
-        case 'Long': add(sel(inp.Label, inp.Labels, inp.Values.indexOf(Math.round(ps.Value[0])), j => { ps.Value[0] = inp.Values[j]; go(); })); break;
-        case 'Bool': add(chk(inp.Label, ps.Value[0] > 0.5, b => { ps.Value[0] = b ? 1 : 0; go(); })); break;
-        case 'Event': add(el('button', { class: 'big', textContent: inp.Label, onclick: () => post({ op: 'param', scene: i, name: inp.Name, state: { ...ps, Value: [1] } }) })); break;
-        case 'Point2D':
-          add(slider(inp.Label + ' X', ps.Value[0], inp.Min[0], inp.Max[0], x => { ps.Value[0] = x; go(); }),
-              slider(inp.Label + ' Y', ps.Value[1], inp.Min[1], inp.Max[1], x => { ps.Value[1] = x; go(); }));
-          break;
-        case 'Image': {
-          const md = S.Media && S.Media[inp.Name], src = md ? md.Src : '', speed = md ? md.Speed : 1;
-          const isUrl = /^https?:\/\//i.test(src), files = S.MediaFiles;
-          const set = v => post({ op: 'media', scene: i, name: inp.Name, value: v });
-          const opts = ['(nada: negro)', ...files, 'URL (http / https)…'];
-          add(sel(inp.Label, opts, !src ? 0 : isUrl ? opts.length - 1 : files.indexOf(src) + 1,
-            j => set(j === 0 ? null : { Src: j === opts.length - 1 ? 'https://' : files[j - 1], Speed: speed })));
-          if (src && !isUrl && !files.includes(src)) add(el('p', { textContent: `No está en este equipo: ${src}. Subilo en Archivos.`, style: 'color:#f77' }));
-          if (isUrl) add(row('URL', txt(src === 'https://' ? '' : src, v => set({ Src: v.trim(), Speed: speed }), 'https://…/video.mp4')),
-            hint('Dirección directa a un .mp4 / .webm (o .m3u8 en el TV). YouTube y otras páginas no funcionan.'));
-          if (md) add(slider('Velocidad', speed, 0.1, 4, x => edit('m:' + inp.Name, { op: 'media', scene: i, name: inp.Name, value: { Src: src, Speed: x } }), true));
-          break;
-        }
-        case 'Color': {
-          const c = el('input', { type: 'color', value: hex(ps.Value),
-            oninput: () => { for (let k = 0; k < 3; k++) ps.Value[k] = parseInt(c.value.substr(1 + 2 * k, 2), 16) / 255; go(); } });
-          add(row(inp.Label, c), slider(inp.Label + ' alfa', ps.Value[3], 0, 1, x => { ps.Value[3] = x; go(); }));
-          break;
-        }
-      }
-    }
-    const defs = S.EffectDefs.filter(d => S.Effects && S.Effects[d.Name]);
-    // in use (with their siblings: strobe, mask, monocolor) on top, like the PC; the rest folded below
-    const grp = n => /^strobe/.test(n) ? 'strobe' : /^mask/.test(n) ? 'mask' : /^tint/.test(n) ? 'tint' : n;
-    const inUse = d => { // same as EffectDefs.IsActive
-      const ps = S.Effects[d.Name];
-      if (ps.Off) return false;
-      if (ps.Mod.Kind !== 'Constant') return true;
-      const [lo, hi] = range(ps.Mod, d.Min, d.Max);
-      return Math.abs(Math.min(hi, Math.max(lo, ps.Value[0])) - d.Default) > 1e-4;
-    };
-    const used = new Set(defs.filter(inUse).map(d => grp(d.Name)));
-    const on = defs.filter(d => used.has(grp(d.Name))), off = defs.filter(d => !used.has(grp(d.Name)));
-    card('fx', 'Efectos activos', 'c-fx', true, on.length + '');
-    if (!on.length) add(hint('Ninguno. Abrí "Más efectos" y mové alguno.'));
-    on.forEach(fx);
-    add(el('div', { class: 'row' },
+    add(...inputsEd(inputs, S.Params, S.Media, { scene: i }, '', false));
+    const F = fxEd(S.Effects, { scene: i }, '');
+    card('fx', 'Efectos activos', 'c-fx', true, F.on.length + '');
+    if (!F.on.length) add(hint('Ninguno. Abrí "Más efectos" y mové alguno.'));
+    add(...F.on, el('div', { class: 'row' },
       btn('Restablecer efectos', () => { if (confirm('¿Volver los efectos de esta escena a sus valores por defecto?')) post({ op: 'resetEffects', scene: i }); }),
       btn('Copiar a todas las escenas', () => { if (confirm('¿Reemplazar los efectos de las otras escenas por estos?')) post({ op: 'copyEffects', scene: i }); })));
-    card('fxoff', 'Más efectos', 'c-fx', false, off.length + '');
-    if (!off.length) add(hint('Están todos en uso.'));
-    off.forEach(fx);
-    function fx(d) { // on/off switch + value + modifier; off keeps the settings
-      const ps = S.Effects[d.Name];
-      const mk = () => ({ op: 'effect', scene: i, name: d.Name, state: ps });
-      const box = el('div', { className: 'fx' + (ps.Off ? ' off' : '') });
-      const cb = el('input', { type: 'checkbox', checked: !ps.Off,
-        onchange: () => { ps.Off = !cb.checked; box.classList.toggle('off', ps.Off); edit('e:' + d.Name, mk()); } });
-      box.append(...paramEd(d.Label, ps, d.Min, d.Max, d.Labels, 'e:' + d.Name, mk, {
-        cap: d.Name === 'strobeRate' ? S.MaxHz : undefined,
-        decorate: lbl => { if (inUse(d)) lbl.prepend(el('i', { class: 'dot' })); lbl.prepend(cb); },
-      }));
-      add(box);
-    }
+    card('fxoff', 'Más efectos', 'c-fx', false, F.off.length + '');
+    if (!F.off.length) add(hint('Están todos en uso.'));
+    add(...F.off);
+    layersEd(i);
   }
 }
 
+// ---- a picture's editors (the scene's, or a layer's with base.layer): elements to add ----
+function inputsEd(inputs, params, media, base, kp, filter) {
+  const out = [];
+  for (const inp of inputs) {
+    const ps = params && params[inp.Name];
+    const key = kp + 'p:' + inp.Name, mk = () => ({ op: 'param', ...base, name: inp.Name, state: ps }), go = () => edit(key, mk());
+    switch (inp.Type) {
+      case 'Float': out.push(...paramEd(inp.Label, ps, inp.Min[0], inp.Max[0], null, key, mk)); break;
+      case 'Long': out.push(sel(inp.Label, inp.Labels, inp.Values.indexOf(Math.round(ps.Value[0])), j => { ps.Value[0] = inp.Values[j]; go(); })); break;
+      case 'Bool': out.push(chk(inp.Label, ps.Value[0] > 0.5, b => { ps.Value[0] = b ? 1 : 0; go(); })); break;
+      case 'Event': out.push(el('button', { class: 'big', textContent: inp.Label, onclick: () => post({ op: 'param', ...base, name: inp.Name, state: { ...ps, Value: [1] } }) })); break;
+      case 'Point2D':
+        out.push(slider(inp.Label + ' X', ps.Value[0], inp.Min[0], inp.Max[0], x => { ps.Value[0] = x; go(); }),
+                 slider(inp.Label + ' Y', ps.Value[1], inp.Min[1], inp.Max[1], x => { ps.Value[1] = x; go(); }));
+        break;
+      case 'Image': {
+        const md = media && media[inp.Name], src = md ? md.Src : '', speed = md ? md.Speed : 1;
+        const isUrl = /^https?:\/\//i.test(src), files = S.MediaFiles;
+        const set = v => post({ op: 'media', ...base, name: inp.Name, value: v });
+        const opts = [filter && inp.Name === 'inputImage' ? '(lo que está debajo)' : '(nada: negro)', ...files, 'URL (http / https)…'];
+        out.push(sel(inp.Label, opts, !src ? 0 : isUrl ? opts.length - 1 : files.indexOf(src) + 1,
+          j => set(j === 0 ? null : { Src: j === opts.length - 1 ? 'https://' : files[j - 1], Speed: speed })));
+        if (src && !isUrl && !files.includes(src)) out.push(el('p', { textContent: `No está en este equipo: ${src}. Subilo en Archivos.`, style: 'color:#f77' }));
+        if (isUrl) out.push(row('URL', txt(src === 'https://' ? '' : src, v => set({ Src: v.trim(), Speed: speed }), 'https://…/video.mp4')),
+          hint('Dirección directa a un .mp4 / .webm (o .m3u8 en el TV). YouTube y otras páginas no funcionan.'));
+        if (md) out.push(slider('Velocidad', speed, 0.1, 4, x => edit(kp + 'm:' + inp.Name, { op: 'media', ...base, name: inp.Name, value: { Src: src, Speed: x } }), true));
+        break;
+      }
+      case 'Color': {
+        const c = el('input', { type: 'color', value: hex(ps.Value),
+          oninput: () => { for (let k = 0; k < 3; k++) ps.Value[k] = parseInt(c.value.substr(1 + 2 * k, 2), 16) / 255; go(); } });
+        out.push(row(inp.Label, c), slider(inp.Label + ' alfa', ps.Value[3], 0, 1, x => { ps.Value[3] = x; go(); }));
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+// in use (with their siblings: strobe, mask, monocolor) apart from the rest, like the PC
+function fxEd(effects, base, kp) {
+  const defs = S.EffectDefs.filter(d => effects && effects[d.Name]);
+  const grp = n => /^strobe/.test(n) ? 'strobe' : /^mask/.test(n) ? 'mask' : /^tint/.test(n) ? 'tint' : n;
+  const inUse = d => { // same as EffectDefs.IsActive
+    const ps = effects[d.Name];
+    if (ps.Off) return false;
+    if (ps.Mod.Kind !== 'Constant') return true;
+    const [lo, hi] = range(ps.Mod, d.Min, d.Max);
+    return Math.abs(Math.min(hi, Math.max(lo, ps.Value[0])) - d.Default) > 1e-4;
+  };
+  const used = new Set(defs.filter(inUse).map(d => grp(d.Name)));
+  const fx = d => { // on/off switch + value + modifier; off keeps the settings
+    const ps = effects[d.Name];
+    const mk = () => ({ op: 'effect', ...base, name: d.Name, state: ps });
+    const box = el('div', { className: 'fx' + (ps.Off ? ' off' : '') });
+    const cb = el('input', { type: 'checkbox', checked: !ps.Off,
+      onchange: () => { ps.Off = !cb.checked; box.classList.toggle('off', ps.Off); edit(kp + 'e:' + d.Name, mk()); } });
+    box.append(...paramEd(d.Label, ps, d.Min, d.Max, d.Labels, kp + 'e:' + d.Name, mk, {
+      cap: d.Name === 'strobeRate' ? S.MaxHz : undefined,
+      decorate: lbl => { if (inUse(d)) lbl.prepend(el('i', { class: 'dot' })); lbl.prepend(cb); },
+    }));
+    return box;
+  };
+  return { on: defs.filter(d => used.has(grp(d.Name))).map(fx), off: defs.filter(d => !used.has(grp(d.Name))).map(fx) };
+}
+
+// ---- layers: drawn over the scene's shader in order, each with its blend, parameters and effects ----
+const BLENDS_V = ['Normal', 'Add', 'Subtract', 'Multiply', 'Screen', 'Overlay', 'SoftLight', 'HardLight', 'Difference', 'Exclusion',
+  'Lighten', 'Darken', 'Dodge', 'Burn', 'Hue', 'Color', 'Luminosity'];
+let layerAdd = 0;
+function layersEd(i) {
+  const L = S.Layers || [], names = S.BlendNames || BLENDS_V;
+  card('layers', 'Capas', 'c-scene', true, L.length ? L.length + '' : 'ninguna');
+  add(hint('Se dibujan sobre el shader de la escena, en orden. Los efectos de la escena van encima de todo.'));
+  if (S.Shaders.length && L.length < 16) {
+    layerAdd = Math.min(layerAdd, S.Shaders.length - 1);
+    add(el('div', { class: 'row' }, selEl(S.Shaders, layerAdd, j => layerAdd = j),
+      btn('Agregar capa', () => post({ op: 'layerAdd', scene: i, shader: S.Shaders[layerAdd] }))));
+  }
+  L.forEach((l, k) => {
+    const base = { scene: i, layer: k }, kp = `L${k}`, set = v => post({ op: 'layerSet', ...base, ...v });
+    const bi = Math.max(0, BLENDS_V.indexOf(l.Blend));
+    card('layer' + k, `Capa ${k + 1}`, 'c-scene', true, `${l.Shader} · ${names[bi]}${l.Off ? ' · oculta' : ''}${l.Fx.length ? ' · ' + l.Fx.join(', ') : ''}`);
+    add(chk('Visible', !l.Off, b => set({ off: !b })),
+      sel('Blend', names, bi, j => set({ blend: j })),
+      sel('Shader', S.Shaders, Math.max(0, S.Shaders.indexOf(l.Shader)), j => set({ shader: S.Shaders[j] })),
+      el('div', { class: 'row' },
+        btn('Subir', () => post({ op: 'layerMove', ...base, to: k - 1 })),
+        btn('Bajar', () => post({ op: 'layerMove', ...base, to: k + 1 })),
+        btn('Duplicar', () => post({ op: 'layerDup', ...base })),
+        btn('Quitar', () => { if (confirm('¿Quitar esta capa?')) post({ op: 'layerRemove', ...base }); }, 'danger')));
+    if (l.Filter) add(hint('Filtro: recibe la imagen de lo que está debajo.'));
+    const inputs = (l.Inputs || []).filter(inp => (l.Params && l.Params[inp.Name]) || inp.Type === 'Image');
+    if (inputs.length) add(el('h3', { textContent: 'Parámetros' }), ...inputsEd(inputs, l.Params, l.Media, base, kp, l.Filter));
+    const F = fxEd(l.Effects, base, kp);
+    add(el('h3', { textContent: 'Efectos de la capa' }), ...(F.on.length ? F.on : [hint('Ninguno en uso.')]),
+      el('details', { class: 'more' }, el('summary', { textContent: `Más efectos (${F.off.length})` }), ...F.off),
+      el('div', { class: 'row' }, btn('Restablecer efectos', () => { if (confirm('¿Volver los efectos de esta capa a sus valores por defecto?')) post({ op: 'resetEffects', ...base }); })));
+  });
+}
 function renderFiles() {
   card('add', 'Agregar escena', 'c-files');
   let pick = 0;
@@ -786,14 +897,16 @@ function pvLoop(now) {
 if (pvThumbs) requestAnimationFrame(pvLoop);
 
 function renderProj() {
-  const d = S.Device; // only the TV / Android app sends this
+  const d = S.Device; // the TV / Android app sends all of it, the PC only the resolution
   if (d) {
     card('dev', 'Este dispositivo', 'c-dev');
-    const src = d.Sources.map(s => s.Id), SCALES = [1, 0.75, 0.5, 0.35];
-    add(sel('Fuente de sonido', d.Sources.map(s => s.Label), src.indexOf(d.Source), j => post({ op: 'device', source: src[j] })),
-        sel('Resolución interna', ['100 %', '75 %', '50 %', '35 %'], SCALES.reduce((b, s, k) => Math.abs(s - d.Scale) < Math.abs(SCALES[b] - d.Scale) ? k : b, 0),
-          j => post({ op: 'device', scale: SCALES[j] })),
-        sel('Cuadros por segundo', ['60', '30'], d.Fps >= 60 ? 0 : 1, j => post({ op: 'device', fps: j ? 30 : 60 })),
+    const SCALES = [1, 0.75, 0.5, 0.35];
+    if (d.Sources) { const src = d.Sources.map(s => s.Id); add(sel('Fuente de sonido', d.Sources.map(s => s.Label), src.indexOf(d.Source), j => post({ op: 'device', source: src[j] }))); }
+    add(sel('Resolución interna', ['100 %', '75 %', '50 %', '35 %'], SCALES.reduce((b, s, k) => Math.abs(s - d.Scale) < Math.abs(SCALES[b] - d.Scale) ? k : b, 0),
+      j => post({ op: 'device', scale: SCALES[j] })));
+    if (!d.Sources) { add(el('p', { textContent: 'Si va lento, bajá la resolución interna (del visor y de la ventana de salida).' })); }
+    else {
+    add(sel('Cuadros por segundo', ['60', '30'], d.Fps >= 60 ? 0 : 1, j => post({ op: 'device', fps: j ? 30 : 60 })),
         el('p', { textContent: 'Si va lento o se traba, bajá la resolución interna o pasá a 30 cuadros. Los equipos USB aparecen al conectarlos.' }));
     const CANVAS = ['full', '16:9', '4:3', '1:1', 'px'];
     add(sel('Lienzo', ['Pantalla completa', '16:9 centrado', '4:3 centrado', 'Cuadrado 1:1', 'Personalizado (píxeles)'],
@@ -807,6 +920,15 @@ function renderProj() {
       if (b && !confirm('Los destellos de más de 3 por segundo pueden provocar crisis en personas con epilepsia fotosensible. Activalo solo si sabés que nadie del público está en riesgo.')) { render(); return; }
       post({ op: 'device', fastStrobe: b });
     }));
+    add(slider('Caída del audio (s)', d.AudioRelease, 0.02, 0.4, x => edit('release', { op: 'device', release: x }), true),
+        el('p', { textContent: 'Cuánto tarda el nivel en bajar después de un golpe. Más bajo = baja a 0 entre golpes en temas rápidos.' }));
+    const sense = d.BandSense && d.BandSense.length === 4 ? d.BandSense : [1, 1, 1, 1];
+    add(el('h3', { textContent: 'Sensibilidad por banda' }),
+        ...sense.map((v, i) => slider(BANDS[i], v, 0.1, 10, x => { sense[i] = x; edit('sense', { op: 'device', sense }); }, true)),
+        el('p', { textContent: 'Con música fuerte cada banda debería llegar cerca de 1 en los golpes (medidores en la pestaña En vivo).' }),
+        slider('Suavizado de melodía (s)', d.MelodySmooth ?? 0.8, 0.1, 3, x => edit('melody', { op: 'device', melody: x }), true),
+        el('p', { textContent: 'Cuántos segundos promedia la melodía. Más alto = se mueve más suave y lento.' }));
+    }
   }
   card('proj', 'Proyecto', 'c-scene', true, S.Loaded || S.Project);
   add(row('Abrir', selEl(S.Projects, S.Projects.indexOf(S.Loaded), j => post({ op: 'open', name: S.Projects[j] }))));
@@ -831,31 +953,46 @@ function renderProj() {
       chk('Fundido entre escenas', S.Crossfade, b => { S.Crossfade = b; pj(); }),
       slider('Duración del fundido (s)', S.CrossfadeSeconds, 0.1, 10, x => { S.CrossfadeSeconds = x; pj(); }));
 
-  const a = S.AutoStrobe, go = () => edit('auto', { op: 'autostrobe', value: a });
+  const a = S.AutoStrobe, go = () => edit('auto', { op: 'autostrobe', value: a }), now = () => { go(); S.AutoStrobe = a; render(); }; // S may be a newer poll's: show this edit now
+  const C = a.Configs || (a.Configs = [{}]);
   card('auto', 'Auto strobe', 'c-strobe', true, a.Enabled ? 'activado' : 'apagado');
   add(chk('Activado', a.Enabled, b => { a.Enabled = b; go(); }),
       sel('Banda', BANDS, BANDS_V.indexOf(a.Band), i => { a.Band = BANDS_V[i]; go(); }),
       slider('Ganancia', a.Gain, 0.1, 10, x => { a.Gain = x; go(); }, true),
+      chk('Autoganancia', a.AutoGain, b => { a.AutoGain = b; go(); }),
       slider('Umbral', a.Threshold, 0.05, 1, x => { a.Threshold = x; go(); }),
       slider('Probabilidad (%)', a.Probability, 0, 100, x => { a.Probability = x; go(); }),
-      sel('Duración', ['Fija', 'Al azar'], a.RandomDuration ? 1 : 0, i => { a.RandomDuration = i === 1; go(); render(); }));
-  if (a.RandomDuration) add(
-      slider('Mínimo (s)', a.MinDuration, 0.1, 30, x => { a.MinDuration = Math.min(x, a.MaxDuration); go(); }),
-      slider('Máximo (s)', a.MaxDuration, 0.1, 30, x => { a.MaxDuration = Math.max(x, a.MinDuration); go(); }));
-  else add(slider('Segundos', a.Duration, 0.1, 30, x => { a.Duration = x; go(); }));
-  add(slider('Enfriamiento (s)', a.Cooldown, 0, 120, x => { a.Cooldown = x; go(); }),
-      sel('Ritmo', ['Lineal (Strobe Hz)', 'Sigue la banda'], a.Rhythm === 'Beat' ? 1 : 0, i => { a.Rhythm = i ? 'Beat' : 'Linear'; go(); }),
-      sel('Al terminar', ['Seguir en la escena', 'Pasar a la siguiente'], a.NextScene ? 1 : 0, i => { a.NextScene = i === 1; go(); }));
-  card('flash', 'Destello', 'c-strobe', false, 'del auto strobe');
-  add(slider('Strobe Hz', Math.min(a.Rate, S.MaxHz), 0.5, S.MaxHz, x => { a.Rate = x; go(); }),
-      slider('Strobe duración', a.Duty, 0.05, 0.95, x => { a.Duty = x; go(); }),
-      slider('Strobe intensidad', a.Intensity, 0, 1, x => { a.Intensity = x; go(); }),
-      sel('Strobe modo', S.StrobeModes, a.Mode, i => { a.Mode = i; go(); render(); }));
-  if (a.Mode === 3) add(slider('Strobe tono', a.Hue, 0, 1, x => { a.Hue = x; go(); }), hint('0 rojo · 0,33 verde · 0,66 azul'));
-  add(
-      el('p', { textContent: 'No se dispara mientras la escena que suena tiene su propio strobe. El botón STROBE del teléfono usa este destello.' }));
+      slider('Enfriamiento (s)', a.Cooldown, 0, 120, x => { a.Cooldown = x; go(); }),
+      sel('Elegir configuración', ['En orden', 'Al azar'], a.Shuffle ? 1 : 0, i => { a.Shuffle = i === 1; go(); }),
+      el('p', { textContent: 'Cada ráfaga usa una configuración. No se dispara mientras la escena que suena tiene su propio strobe. El botón STROBE del teléfono usa la que toca a continuación.' }));
+  if (C.length < 16) add(el('div', { class: 'row' }, btn('Agregar configuración', () => { C.push({ Name: '', On: true, RandomDuration: false, Duration: 2, MinDuration: 1, MaxDuration: 4,
+    Rhythm: 'Linear', NextScene: false, Rate: 3, Duty: 0.3, Intensity: 1, Mode: 0, Hue: 0 }); now(); })));
+  C.forEach((f, k) => {
+    const title = `${k + 1}. ${f.Name.trim() || `${S.StrobeModes[f.Mode] || ''} ${fmt(f.Rate)} Hz`}`;
+    card('acfg' + k, title, 'c-strobe', false, (f.On ? '' : 'fuera de la rotación · ') + (f.NextScene ? 'pasa de escena' : 'sigue en la escena'));
+    cur.parentNode.dataset.cfg = k;
+    add(chk('En la rotación', f.On, b => { f.On = b; now(); }),
+        row('Nombre', txt(f.Name, v => { f.Name = v.trim().slice(0, 60); now(); }, 'opcional')),
+        sel('Duración', ['Fija', 'Al azar'], f.RandomDuration ? 1 : 0, i => { f.RandomDuration = i === 1; now(); }));
+    if (f.RandomDuration) add(
+        slider('Mínimo (s)', f.MinDuration, 0.1, 30, x => { f.MinDuration = Math.min(x, f.MaxDuration); go(); }),
+        slider('Máximo (s)', f.MaxDuration, 0.1, 30, x => { f.MaxDuration = Math.max(x, f.MinDuration); go(); }));
+    else add(slider('Segundos', f.Duration, 0.1, 30, x => { f.Duration = x; go(); }));
+    add(sel('Ritmo', ['Lineal (Strobe Hz)', 'Sigue la banda'], f.Rhythm === 'Beat' ? 1 : 0, i => { f.Rhythm = i ? 'Beat' : 'Linear'; go(); }),
+        sel('Al terminar', ['Seguir en la escena', 'Pasar a la siguiente'], f.NextScene ? 1 : 0, i => { f.NextScene = i === 1; now(); }),
+        slider('Strobe Hz', Math.min(f.Rate, S.MaxHz), 0.5, S.MaxHz, x => { f.Rate = x; go(); }),
+        slider('Strobe duración', f.Duty, 0.05, 0.95, x => { f.Duty = x; go(); }),
+        slider('Strobe intensidad', f.Intensity, 0, 1, x => { f.Intensity = x; go(); }),
+        sel('Strobe modo', S.StrobeModes, f.Mode, i => { f.Mode = i; now(); }));
+    if (f.Mode === 3) add(slider('Strobe tono', f.Hue, 0, 1, x => { f.Hue = x; go(); }), hint('0 rojo · 0,33 verde · 0,66 azul'));
+    const mv = to => { C.splice(to, 0, C.splice(k, 1)[0]); now(); };
+    add(el('div', { class: 'row' },
+        btn('Subir', () => k > 0 && mv(k - 1)),
+        btn('Bajar', () => k < C.length - 1 && mv(k + 1)),
+        ...(C.length < 16 ? [btn('Duplicar', () => { C.splice(k + 1, 0, { ...f }); now(); })] : []),
+        ...(C.length > 1 ? [btn('Quitar', () => { if (confirm('¿Quitar esta configuración?')) { C.splice(k, 1); now(); } }, 'danger')] : [])));
+  });
 }
-
 poll();
 </script>
 </body>

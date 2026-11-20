@@ -53,6 +53,10 @@ sealed class Settings
     public string MediaFolder { get; set; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyVideos), "Visual");
     public string? AudioDeviceId { get; set; }
     public float InputGain { get; set; } = 1;
+    public float AudioRelease { get; set; } = 0.15f;
+    /// <summary>Sensibilidad of bass, mid, high, melody.</summary>
+    public float[] BandSense { get; set; } = [1, 1, 1, 1];
+    public float MelodySmooth { get; set; } = 0.8f;
     public bool AllowFastStrobe { get; set; }
     public string? LastProject { get; set; }
     // viewer rectangle inside the window, in pixels from the top-left; per machine because it depends on the screen
@@ -68,6 +72,8 @@ sealed class Settings
     public string NetAudioUrl { get; set; } = "";
     public int OutputMonitor { get; set; }
     public bool SeparateOutput { get; set; }
+    /// <summary>Internal resolution as a fraction of the viewer / output window (0.25..1): lower = lighter on the GPU.</summary>
+    public float Scale { get; set; } = 1;
 
     public static Settings Load()
     {

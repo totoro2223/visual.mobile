@@ -7,8 +7,23 @@ namespace Visual.Desktop;
 sealed partial class App
 {
     static readonly string[] KindNames = ["Constante", "Lineal", "Audio"];
-    static readonly string[] ModeNames = ["Reiniciar", "Rebotar"];
-    static readonly string[] BandNames = ["Graves", "Medios", "Agudos"];
+    static readonly string[] ModeNames = ["Reiniciar", "Rebotar", "Rebotar invertido"];
+    static readonly string[] BandNames = ["Graves", "Medios", "Agudos", "Melodía", "Nota"];
+    static readonly string[] NoteNames = ["Do", "Do#", "Re", "Re#", "Mi", "Fa", "Fa#", "Sol", "Sol#", "La", "La#", "Si"];
+
+    /// <summary>The note band (0..1) as a note name, e.g. "La 4".</summary>
+    static string NoteName(float v)
+    {
+        double hz = AudioAnalyzer.NoteLo * Math.Pow(AudioAnalyzer.NoteHi / AudioAnalyzer.NoteLo, v);
+        int midi = (int)Math.Round(69 + 12 * Math.Log2(hz / 440));
+        return $"{NoteNames[(midi % 12 + 12) % 12]} {midi / 12 - 1}";
+    }
+
+    void BandMeter(int b)
+    {
+        float v = analyzer.Bands.Raw[b];
+        ImGui.ProgressBar(Math.Clamp(v, 0, 1), new Vector2(-1, 0), b == (int)Band.Note ? $"Nota {(analyzer.Bands.Raw[(int)Band.Melody] > 0.03f ? NoteName(v) : "-")}" : $"{BandNames[b]} {v:0.00}");
+    }
     static readonly Vector4 Red = new(1f, 0.45f, 0.45f, 1f);
     static readonly Vector4 Yellow = new(1f, 0.85f, 0.4f, 1f);
     static readonly Vector4 Green = new(0.4f, 0.9f, 0.5f, 1f);
@@ -30,7 +45,7 @@ sealed partial class App
         ImGui.SetNextWindowPos(new Vector2(10, 10), ImGuiCond.FirstUseEver);
         ImGui.SetNextWindowSize(new Vector2(500, 760), ImGuiCond.FirstUseEver);
         ImGui.Begin("Visual   (F1 ocultar · F11 pantalla completa · N siguiente)");
-        if (renderer.StrobeActive) Colored(Yellow, "STROBE");
+        if (renderer.StrobeActive) Colored(Yellow, "STROBE"); else ImGui.TextUnformatted(""); // keeps the line so the form doesn't jump
         float foot = status != "" ? ImGui.GetTextLineHeightWithSpacing() * 2 + ImGui.GetStyle().ItemSpacing.Y : 0;
         if (ImGui.BeginTabBar("tabs"))
         {
@@ -99,11 +114,7 @@ sealed partial class App
         }
         if (Section("Audio###liveaudio", CDev))
         {
-            for (int b = 0; b < 3; b++)
-            {
-                float v = analyzer.Bands.Raw[b];
-                ImGui.ProgressBar(Math.Clamp(v, 0, 1), new Vector2(-1, 0), $"{BandNames[b]} {v:0.00}");
-            }
+            for (int b = 0; b < AudioBands.Count; b++) BandMeter(b);
             if (capture.Error != null) Colored(Red, capture.Error);
             ImGui.TextDisabled("Fuente y ganancia: pestaña Ajustes.");
             EndSection();
@@ -205,7 +216,7 @@ sealed partial class App
             ImGui.SameLine();
             var dur = s.Duration > 0 ? $"{s.Duration:0.#} s" : "manual";
             var fx = string.Join(" · ", EffectDefs.ActiveLabels(s.Effects));
-            var lvl = Scene.LevelNames[s.Level].ToLowerInvariant();
+            var lvl = Scene.LevelNames[s.Level].ToLowerInvariant() + (s.Layers.Count switch { 0 => "", 1 => " · 1 capa", var c => $" · {c} capas" });
             if (ImGui.Selectable($"{i + 1}. {s.Title}   [{dur} · {lvl}]{(fx == "" ? "" : "   " + fx)}##scene{i}", i == selected)) selected = i;
             if (playing) SceneProgress(s);
         }
@@ -292,7 +303,81 @@ sealed partial class App
             EndSection();
         }
         EffectsSections(scene);
+        LayersSection(scene, time: selected == player.Current ? player.SceneTime : 0);
     }
+
+    int layerAddIndex;
+
+    /// <summary>The scene's layers, in drawing order: each one its shader, blend, parameters and effects.</summary>
+    void LayersSection(Scene scene, double time)
+    {
+        if (!Section($"Capas ({scene.Layers.Count})###slayers", CScene)) return;
+        ImGui.TextDisabled("Se dibujan sobre el shader de la escena, en orden; los efectos de la escena van encima de todo.");
+        Action? later = null; // list changes after the loop
+        for (int i = 0; i < scene.Layers.Count; i++)
+        {
+            var l = scene.Layers[i];
+            int k = i;
+            ImGui.PushID(i);
+            bool vis = !l.Off;
+            if (ImGui.Checkbox("##vis", ref vis)) l.Off = !vis;
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip(vis ? "Ocultar sin perder la configuración" : "Mostrar");
+            ImGui.SameLine();
+            if (ImGui.ArrowButton("##up", ImGuiDir.Up) && i > 0) later = () => { scene.Layers.RemoveAt(k); scene.Layers.Insert(k - 1, l); };
+            ImGui.SameLine();
+            if (ImGui.ArrowButton("##down", ImGuiDir.Down) && i < scene.Layers.Count - 1) later = () => { scene.Layers.RemoveAt(k); scene.Layers.Insert(k + 1, l); };
+            ImGui.SameLine();
+            var prog = renderer.Get(l.Shader);
+            var fx = string.Join(" · ", EffectDefs.ActiveLabels(l.Effects));
+            if (l.Off) ImGui.PushStyleVar(ImGuiStyleVar.Alpha, 0.45f);
+            bool open = ImGui.TreeNode($"{i + 1}. {l.Shader}   [{Layer.BlendNames[(int)l.Blend]}]{(fx == "" ? "" : "   " + fx)}###layer");
+            if (l.Off) ImGui.PopStyleVar();
+            if (open)
+            {
+                int si = Math.Max(0, Array.IndexOf(shaderFiles, l.Shader));
+                if (shaderFiles.Length > 0 && ImGui.Combo("Shader", ref si, shaderFiles, shaderFiles.Length)) l.Shader = shaderFiles[si];
+                int b = Enum.IsDefined(l.Blend) ? (int)l.Blend : 0;
+                if (ImGui.Combo("Blend", ref b, Layer.BlendNames, Layer.BlendNames.Length)) l.Blend = (BlendMode)b;
+                if (ImGui.Button("Duplicar")) later = () => scene.Layers.Insert(k + 1, l.Clone());
+                ImGui.SameLine();
+                if (ImGui.Button("Quitar capa")) later = () => scene.Layers.RemoveAt(k);
+                if (prog.Error != null) Colored(Red, prog.Error);
+                prog.Isf.EnsureParams(l.Params);
+                bool filter = prog.Isf.Inputs.Any(x => x.Name == Layer.Below && x.IsTexture);
+                if (filter) ImGui.TextDisabled("Filtro: recibe la imagen de lo que está debajo.");
+                if (ImGui.TreeNodeEx("Parámetros", ImGuiTreeNodeFlags.DefaultOpen))
+                {
+                    foreach (var inp in prog.Isf.Inputs) InputEditor(inp, l, time, filter);
+                    if (prog.Isf.Inputs.Count == 0) ImGui.TextDisabled("Este shader no tiene parámetros.");
+                    ImGui.TreePop();
+                }
+                if (ImGui.TreeNodeEx("Efectos de la capa", ImGuiTreeNodeFlags.DefaultOpen))
+                {
+                    EffectsBody(l);
+                    ImGui.TreePop();
+                }
+                ImGui.TreePop();
+            }
+            ImGui.PopID();
+        }
+        later?.Invoke();
+        if (shaderFiles.Length > 0 && scene.Layers.Count < Remote.MaxLayers)
+        {
+            layerAddIndex = Math.Clamp(layerAddIndex, 0, shaderFiles.Length - 1);
+            ImGui.Combo("##addlayer", ref layerAddIndex, shaderFiles, shaderFiles.Length);
+            ImGui.SameLine();
+            if (ImGui.Button("Agregar capa"))
+            {
+                var nl = new Layer { Shader = shaderFiles[layerAddIndex] };
+                nl.EnsureEffects();
+                scene.Layers.Add(nl);
+            }
+        }
+        EndSection();
+    }
+
+    static readonly float[] Scales = [1, 0.75f, 0.5f, 0.35f]; // same as the TV
+    static readonly string[] ScaleNames = ["100 %", "75 %", "50 %", "35 %"];
 
     static readonly string[] CanvasLabels = ["Pantalla completa", "16:9 centrado", "4:3 centrado", "Cuadrado 1:1", "Personalizado (píxeles)"];
 
@@ -312,7 +397,7 @@ sealed partial class App
         if (ImGui.InputInt("Alto (px)##cv", ref h)) c.H = Math.Max(1, h);
     }
 
-    void InputEditor(IsfInput i, Scene scene, double time)
+    void InputEditor(IsfInput i, Picture scene, double time, bool filter = false)
     {
         var ps = scene.Params;
         ImGui.PushID(i.Name);
@@ -345,18 +430,18 @@ sealed partial class App
                 ImGui.TextDisabled($"{i.Label}: audio automático");
                 break;
             default:
-                MediaEditor(i, scene);
+                MediaEditor(i, scene, filter && i.Name == Layer.Below);
                 break;
         }
         ImGui.PopID();
     }
 
     /// <summary>Video / picture of an image input: a file of the media folder or a URL, plus speed.</summary>
-    void MediaEditor(IsfInput i, Scene scene)
+    void MediaEditor(IsfInput i, Picture scene, bool below = false)
     {
         var m = scene.Media.GetValueOrDefault(i.Name);
         var src = m?.Src ?? "";
-        var items = new[] { "(nada: negro)" }.Concat(mediaFiles).Append("URL (http / https)...").ToArray();
+        var items = new[] { below ? "(lo que está debajo)" : "(nada: negro)" }.Concat(mediaFiles).Append("URL (http / https)...").ToArray();
         int cur = src == "" ? 0 : Media.IsUrl(src) ? items.Length - 1 : Math.Max(0, Array.IndexOf(mediaFiles, src) + 1);
         if (src != "" && !Media.IsUrl(src) && cur == 0) ImGui.TextColored(Red, $"No está en la carpeta de videos: {src}");
         if (ImGui.Combo(i.Label, ref cur, items, items.Length))
@@ -375,6 +460,39 @@ sealed partial class App
         float sp = sm.Speed;
         if (ImGui.SliderFloat("Velocidad##media", ref sp, SceneMedia.MinSpeed, SceneMedia.MaxSpeed, "x%.2f", ImGuiSliderFlags.Logarithmic)) sm.Speed = sp;
         if (renderer.MediaError(scene, i.Name) is { } err) Colored(Red, err);
+    }
+
+    /// <summary>"Curva" combo: each option with a little drawing of its curve.</summary>
+    static void CurveCombo(Modifier m)
+    {
+        const string pad = "       ";
+        float s = ImGui.GetTextLineHeight();
+        uint col = ImGui.GetColorU32(ImGuiCol.Text);
+        if (!Enum.IsDefined(m.Ease)) m.Ease = Ease.Linear;
+        bool open = ImGui.BeginCombo("Curva", pad + Curves.Names[(int)m.Ease], ImGuiComboFlags.HeightLarge);
+        var fr = ImGui.GetItemRectMin();
+        if (open)
+        {
+            for (int i = 0; i < Curves.Names.Length; i++)
+            {
+                var p = ImGui.GetCursorScreenPos();
+                if (ImGui.Selectable(pad + Curves.Names[i] + "##c" + i, (int)m.Ease == i)) m.Ease = (Ease)i;
+                CurveIcon(ImGui.GetWindowDrawList(), p, s, (Ease)i, m.Steps, col);
+            }
+            ImGui.EndCombo();
+        }
+        CurveIcon(ImGui.GetWindowDrawList(), fr + ImGui.GetStyle().FramePadding, s, m.Ease, m.Steps, col);
+    }
+
+    static void CurveIcon(ImDrawListPtr dl, Vector2 p, float s, Ease e, int steps, uint col)
+    {
+        const int n = 32;
+        float w = s * 1.6f;
+        dl.AddRect(p, p + new Vector2(w, s), col & 0x40FFFFFF);
+        Span<Vector2> pts = stackalloc Vector2[n + 1];
+        for (int i = 0; i <= n; i++)
+            pts[i] = p + new Vector2(w * i / n, s - 1 - (s - 2) * (float)Curves.Of(e, Math.Clamp(steps, 2, 16), i / (double)n));
+        for (int i = 0; i < n; i++) dl.AddLine(pts[i], pts[i + 1], col, 1.5f);
     }
 
     /// <summary>One line: slider (limited to the range) · modifier · arrow for the details (range, invert, modifier settings).
@@ -443,6 +561,12 @@ sealed partial class App
                 if (ImGui.SliderFloat("Velocidad (recorridos/s)", ref speed, 0.001f, 5f, "%.3f", ImGuiSliderFlags.Logarithmic)) m.Speed = speed;
                 int mode = (int)m.Mode;
                 if (ImGui.Combo("Al llegar al borde", ref mode, ModeNames, ModeNames.Length)) m.Mode = (LinearMode)mode;
+                CurveCombo(m);
+                if (m.Ease is Ease.Steps or Ease.RandomSteps or Ease.RandomSmooth)
+                {
+                    int steps = Math.Clamp(m.Steps, 2, 16);
+                    if (ImGui.SliderInt(m.Ease == Ease.Steps ? "Pasos" : "Valores por recorrido", ref steps, 2, 16)) m.Steps = steps;
+                }
             }
             else if (m.Kind == ModKind.Audio)
             {
@@ -475,15 +599,35 @@ sealed partial class App
 
     // effects in use (with their siblings: strobe, mask, monocolor) on top, the rest folded below;
     // the split waits while something is being dragged, so an effect doesn't jump away under the mouse
-    HashSet<string> fxInUse = [];
+    readonly Dictionary<Picture, HashSet<string>> fxInUse = [];
+
+    (EffectDef[] Used, EffectDef[] Others) SplitEffects(Picture pic)
+    {
+        pic.EnsureEffects();
+        if (fxInUse.Count > 64) fxInUse.Clear(); // pictures of closed projects
+        if (!ImGui.IsAnyItemActive() || !fxInUse.ContainsKey(pic))
+            fxInUse[pic] = EffectDefs.All.Where(d => EffectDefs.IsActive(d, pic.Effects[d.Name])).Select(d => EffectDefs.Group(d.Name)).ToHashSet();
+        var used = EffectDefs.All.Where(d => fxInUse[pic].Contains(EffectDefs.Group(d.Name))).ToArray();
+        return (used, EffectDefs.All.Except(used).ToArray());
+    }
+
+    /// <summary>A layer's effects: in use, reset, and the rest folded.</summary>
+    void EffectsBody(Picture pic)
+    {
+        var (used, rest) = SplitEffects(pic);
+        if (used.Length == 0) ImGui.TextDisabled("Ninguno en uso.");
+        foreach (var d in used) EffectRow(d, pic.Effects[d.Name]);
+        if (ImGui.Button("Restablecer efectos")) { pic.Effects.Clear(); pic.EnsureEffects(); }
+        if (ImGui.TreeNode($"Más efectos ({rest.Length})###more"))
+        {
+            foreach (var d in rest) EffectRow(d, pic.Effects[d.Name]);
+            ImGui.TreePop();
+        }
+    }
 
     void EffectsSections(Scene scene)
     {
-        scene.EnsureEffects();
-        if (!ImGui.IsAnyItemActive())
-            fxInUse = EffectDefs.All.Where(d => EffectDefs.IsActive(d, scene.Effects[d.Name])).Select(d => EffectDefs.Group(d.Name)).ToHashSet();
-        var used = EffectDefs.All.Where(d => fxInUse.Contains(EffectDefs.Group(d.Name))).ToArray();
-        var rest = EffectDefs.All.Except(used).ToArray();
+        var (used, rest) = SplitEffects(scene);
         if (Section($"Efectos activos ({used.Length})###fxon", CFx))
         {
             if (used.Length == 0) ImGui.TextDisabled("Ninguno. Abrí \"Más efectos\" y mové alguno.");
@@ -566,7 +710,6 @@ sealed partial class App
     {
         if (Section("Proyecto###proj", CScene)) { ProjectBody(); EndSection(); }
         if (Section("Auto strobe###auto", CStrobe)) { AutoStrobeBody(); EndSection(); }
-        if (Section("Destello###flash", CStrobe, false)) { FlashBody(); EndSection(); }
     }
 
     void ProjectBody()
@@ -646,75 +789,126 @@ sealed partial class App
     static readonly string[] DurationNames = ["Fija", "Al azar"];
     static readonly string[] EndNames = ["Seguir en la escena", "Pasar a la siguiente"];
 
+    static readonly string[] PickNames = ["En orden", "Al azar"];
+
     void AutoStrobeBody()
     {
         var a = project.AutoStrobe;
+        a.Ensure();
         bool on = a.Enabled;
         if (ImGui.Checkbox("Activado##auto", ref on)) a.Enabled = on;
-        if (!on) return;
         var run = renderer.AutoStrobe;
-        Colored(run.Active ? Yellow : run.Blocked ? Red : Green,
-            run.Active ? "Disparando"
-            : run.Blocked ? "Bloqueado: la escena que suena tiene su propio strobe (Strobe Hz > 0)"
-            : run.CooldownLeft > 0 ? $"Enfriamiento: {run.CooldownLeft:0.0} s"
-            : "Esperando que la banda supere el umbral");
+        if (on)
+            Colored(run.Active ? Yellow : run.Blocked ? Red : Green,
+                run.Active ? $"Disparando: {ConfigTitle(a, run.Current)}"
+                : run.Blocked ? "Bloqueado: la escena que suena tiene su propio strobe (Strobe Hz > 0)"
+                : run.Upcoming(a) < 0 ? "Ninguna configuración activa"
+                : run.CooldownLeft > 0 ? $"Enfriamiento: {run.CooldownLeft:0.0} s"
+                : "Esperando que la banda supere el umbral");
         ImGui.PushID("auto");
-        int band = (int)a.Band;
-        if (ImGui.Combo("Banda", ref band, BandNames, BandNames.Length)) a.Band = (Band)band;
-        float g = a.Gain;
-        if (ImGui.SliderFloat("Ganancia", ref g, 0.1f, 10f, "x%.2f", ImGuiSliderFlags.Logarithmic)) a.Gain = g;
-        float t = a.Threshold;
-        if (ImGui.SliderFloat("Umbral", ref t, 0.05f, 1f)) a.Threshold = t;
-        float level = analyzer.Bands.Raw[(int)a.Band] * a.Gain;
-        ImGui.ProgressBar(Math.Clamp(level, 0, 1), new Vector2(-1, 0), level >= a.Threshold ? "supera el umbral" : $"{level:0.00}");
-        float p = a.Probability;
-        if (ImGui.SliderFloat("Probabilidad", ref p, 0f, 100f, "%.0f %%")) a.Probability = p;
+        if (on)
+        {
+            int band = (int)a.Band;
+            if (ImGui.Combo("Banda", ref band, BandNames, BandNames.Length)) a.Band = (Band)band;
+            float g = a.Gain;
+            if (ImGui.SliderFloat("Ganancia", ref g, 0.1f, 10f, "x%.2f", ImGuiSliderFlags.Logarithmic)) a.Gain = g;
+            bool ag = a.AutoGain;
+            if (ImGui.Checkbox("Autoganancia", ref ag)) a.AutoGain = ag;
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip("Mide la banda contra su pico reciente: reacciona igual con temas suaves y fuertes.");
+            float t = a.Threshold;
+            if (ImGui.SliderFloat("Umbral", ref t, 0.05f, 1f)) a.Threshold = t;
+            float level = analyzer.Bands.Get(a.Band, a.AutoGain) * a.Gain;
+            ImGui.ProgressBar(Math.Clamp(level, 0, 1), new Vector2(-1, 0), level >= a.Threshold ? "supera el umbral" : $"{level:0.00}");
+            float p = a.Probability;
+            if (ImGui.SliderFloat("Probabilidad", ref p, 0f, 100f, "%.0f %%")) a.Probability = p;
+            float c = a.Cooldown;
+            if (ImGui.SliderFloat("Enfriamiento (s)", ref c, 0f, 120f)) a.Cooldown = c;
+        }
+        int pick = a.Shuffle ? 1 : 0;
+        if (ImGui.Combo("Elegir configuración", ref pick, PickNames, PickNames.Length)) a.Shuffle = pick == 1;
 
-        int dm = a.RandomDuration ? 1 : 0;
-        if (ImGui.Combo("Duración", ref dm, DurationNames, DurationNames.Length)) a.RandomDuration = dm == 1;
-        if (a.RandomDuration)
+        ImGui.SeparatorText("Configuraciones");
+        Action? later = null; // list changes after the loop
+        int playing = run.Active ? run.Current : -1, upcoming = run.Upcoming(a);
+        for (int i = 0; i < a.Configs.Count; i++)
         {
-            float mn = a.MinDuration, mx = a.MaxDuration;
-            if (ImGui.SliderFloat("Mínimo (s)", ref mn, 0.1f, 30f)) a.MinDuration = Math.Min(mn, a.MaxDuration);
-            if (ImGui.SliderFloat("Máximo (s)", ref mx, 0.1f, 30f)) a.MaxDuration = Math.Max(mx, a.MinDuration);
+            var f = a.Configs[i];
+            int k = i;
+            ImGui.PushID(i);
+            bool act = f.On;
+            if (ImGui.Checkbox("##on", ref act)) f.On = act;
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip(act ? "Sacar de la rotación sin perder la configuración" : "Volver a la rotación");
+            ImGui.SameLine();
+            if (ImGui.ArrowButton("##up", ImGuiDir.Up) && i > 0) later = () => { a.Configs.RemoveAt(k); a.Configs.Insert(k - 1, f); };
+            ImGui.SameLine();
+            if (ImGui.ArrowButton("##down", ImGuiDir.Down) && i < a.Configs.Count - 1) later = () => { a.Configs.RemoveAt(k); a.Configs.Insert(k + 1, f); };
+            ImGui.SameLine();
+            string tag = i == playing ? "   << disparando" : i == upcoming ? "   (la próxima)" : "";
+            if (!f.On) ImGui.PushStyleVar(ImGuiStyleVar.Alpha, 0.45f);
+            if (i == playing) ImGui.PushStyleColor(ImGuiCol.Text, Yellow);
+            bool open = ImGui.TreeNode($"{ConfigTitle(a, i)}{tag}###cfg");
+            if (i == playing) ImGui.PopStyleColor();
+            if (!f.On) ImGui.PopStyleVar();
+            if (open)
+            {
+                string name = f.Name;
+                if (ImGui.InputText("Nombre", ref name, 60)) f.Name = name;
+                ConfigBody(f);
+                if (a.Configs.Count < AutoStrobe.MaxConfigs && ImGui.Button("Duplicar")) later = () => a.Configs.Insert(k + 1, f.Clone());
+                if (a.Configs.Count > 1)
+                {
+                    ImGui.SameLine();
+                    if (ImGui.Button("Quitar")) later = () => a.Configs.RemoveAt(k);
+                }
+                ImGui.TreePop();
+            }
+            ImGui.PopID();
         }
-        else
-        {
-            float d = a.Duration;
-            if (ImGui.SliderFloat("Segundos", ref d, 0.1f, 30f)) a.Duration = d;
-        }
-        float c = a.Cooldown;
-        if (ImGui.SliderFloat("Enfriamiento (s)", ref c, 0f, 120f)) a.Cooldown = c;
-        int r = (int)a.Rhythm;
-        if (ImGui.Combo("Ritmo", ref r, RhythmNames, RhythmNames.Length)) a.Rhythm = (StrobeRhythm)r;
-        int end = a.NextScene ? 1 : 0;
-        if (ImGui.Combo("Al terminar", ref end, EndNames, EndNames.Length)) a.NextScene = end == 1;
+        later?.Invoke();
+        if (a.Configs.Count < AutoStrobe.MaxConfigs && ImGui.Button("Agregar configuración")) a.Configs.Add(new());
+        ImGui.TextDisabled("Cada ráfaga usa una configuración. El botón STROBE del teléfono usa la que toca a continuación.");
         ImGui.TextDisabled("No se dispara mientras la escena que suena tiene su propio strobe.");
         ImGui.PopID();
     }
 
-    /// <summary>The auto strobe's flash; also used by the phone's "hold to strobe" button.</summary>
-    void FlashBody()
+    static string ConfigTitle(AutoStrobe a, int i) =>
+        a.Configs.ElementAtOrDefault(i) is { } f ? (f.Name.Trim() != "" ? $"{i + 1}. {f.Name.Trim()}" : $"{i + 1}. {EffectDefs.StrobeModes[Math.Clamp(f.Mode, 0, EffectDefs.StrobeModes.Length - 1)]} {f.Rate:0.#} Hz") : "";
+
+    /// <summary>One burst configuration: duration, rhythm, what happens after, and its flash.</summary>
+    void ConfigBody(StrobeConfig f)
     {
-        var a = project.AutoStrobe;
-        ImGui.PushID("flash");
+        int dm = f.RandomDuration ? 1 : 0;
+        if (ImGui.Combo("Duración", ref dm, DurationNames, DurationNames.Length)) f.RandomDuration = dm == 1;
+        if (f.RandomDuration)
+        {
+            float mn = f.MinDuration, mx = f.MaxDuration;
+            if (ImGui.SliderFloat("Mínimo (s)", ref mn, 0.1f, 30f)) f.MinDuration = Math.Min(mn, f.MaxDuration);
+            if (ImGui.SliderFloat("Máximo (s)", ref mx, 0.1f, 30f)) f.MaxDuration = Math.Max(mx, f.MinDuration);
+        }
+        else
+        {
+            float d = f.Duration;
+            if (ImGui.SliderFloat("Segundos", ref d, 0.1f, 30f)) f.Duration = d;
+        }
+        int r = (int)f.Rhythm;
+        if (ImGui.Combo("Ritmo", ref r, RhythmNames, RhythmNames.Length)) f.Rhythm = (StrobeRhythm)r;
+        int end = f.NextScene ? 1 : 0;
+        if (ImGui.Combo("Al terminar", ref end, EndNames, EndNames.Length)) f.NextScene = end == 1;
         float maxHz = settings.AllowFastStrobe ? 20 : EffectDefs.SafeStrobeHz;
-        float hz = Math.Min(a.Rate, maxHz);
-        if (ImGui.SliderFloat("Strobe Hz", ref hz, 0.5f, maxHz, "%.1f")) a.Rate = hz;
-        float duty = a.Duty;
-        if (ImGui.SliderFloat("Strobe duración", ref duty, 0.05f, 0.95f)) a.Duty = duty;
-        float inten = a.Intensity;
-        if (ImGui.SliderFloat("Strobe intensidad", ref inten, 0f, 1f)) a.Intensity = inten;
-        int mode = Math.Clamp(a.Mode, 0, EffectDefs.StrobeModes.Length - 1);
-        if (ImGui.Combo("Strobe modo", ref mode, EffectDefs.StrobeModes, EffectDefs.StrobeModes.Length)) a.Mode = mode;
+        float hz = Math.Min(f.Rate, maxHz);
+        if (ImGui.SliderFloat("Strobe Hz", ref hz, 0.5f, maxHz, "%.1f")) f.Rate = hz;
+        float duty = f.Duty;
+        if (ImGui.SliderFloat("Strobe duración", ref duty, 0.05f, 0.95f)) f.Duty = duty;
+        float inten = f.Intensity;
+        if (ImGui.SliderFloat("Strobe intensidad", ref inten, 0f, 1f)) f.Intensity = inten;
+        int mode = Math.Clamp(f.Mode, 0, EffectDefs.StrobeModes.Length - 1);
+        if (ImGui.Combo("Strobe modo", ref mode, EffectDefs.StrobeModes, EffectDefs.StrobeModes.Length)) f.Mode = mode;
         if (mode == 3)
         {
-            float hue = a.Hue;
-            if (ImGui.SliderFloat("Strobe tono", ref hue, 0f, 1f)) a.Hue = hue;
+            float hue = f.Hue;
+            if (ImGui.SliderFloat("Strobe tono", ref hue, 0f, 1f)) f.Hue = hue;
             ImGui.TextDisabled("0 rojo · 0,33 verde · 0,66 azul");
         }
-        ImGui.TextDisabled("Lo usan el auto strobe y el botón STROBE del teléfono.");
-        ImGui.PopID();
     }
 
     // ---- Ajustes ----
@@ -744,6 +938,22 @@ sealed partial class App
 
         float g = settings.InputGain;
         if (ImGui.SliderFloat("Ganancia de entrada", ref g, 0.1f, 10f, "x%.2f", ImGuiSliderFlags.Logarithmic)) settings.InputGain = g;
+        float rel = settings.AudioRelease;
+        if (ImGui.SliderFloat("Caída del audio", ref rel, 0.02f, 0.4f, "%.2f s", ImGuiSliderFlags.Logarithmic)) settings.AudioRelease = rel;
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Cuánto tarda el nivel en bajar después de un golpe.\nMás bajo = baja a 0 entre golpes en temas rápidos.");
+        ImGui.SeparatorText("Sensibilidad por banda");
+        if (settings.BandSense is not { Length: 4 }) settings.BandSense = [1, 1, 1, 1];
+        for (int b = 0; b < 4; b++)
+        {
+            float s = settings.BandSense[b];
+            if (ImGui.SliderFloat($"{BandNames[b]}##sense", ref s, 0.1f, 10f, "x%.2f", ImGuiSliderFlags.Logarithmic)) settings.BandSense[b] = s;
+            BandMeter(b);
+        }
+        ImGui.TextDisabled("Con música fuerte cada banda debería llegar cerca de 1 en los golpes.");
+        if (ImGui.Button("Restablecer sensibilidad")) settings.BandSense = [1, 1, 1, 1];
+        float ms = settings.MelodySmooth;
+        if (ImGui.SliderFloat("Suavizado de melodía", ref ms, 0.1f, 3f, "%.2f s", ImGuiSliderFlags.Logarithmic)) settings.MelodySmooth = ms;
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Cuántos segundos promedia la melodía.\nMás alto = se mueve más suave y lento.");
         if (capture.Error != null) Colored(Red, capture.Error);
 
         ImGui.SeparatorText("Enviar audio a la app del TV");
@@ -800,6 +1010,11 @@ sealed partial class App
 
     void ViewerBody()
     {
+        int si = Array.IndexOf(Scales, Scales.MinBy(s => MathF.Abs(s - settings.Scale)));
+        if (ImGui.Combo("Resolución interna", ref si, ScaleNames, ScaleNames.Length)) { settings.Scale = Scales[si]; settings.Save(); }
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Del visor y de la ventana de salida. Más baja = más liviano; se estira al mostrarla.");
+        var (iw, ih) = renderer.OutputSize;
+        ImGui.TextDisabled($"Dibujando a {iw} x {ih}");
         bool fill = settings.FillWindow;
         if (ImGui.Checkbox("Llenar la ventana", ref fill)) settings.FillWindow = fill;
         if (fill) return;

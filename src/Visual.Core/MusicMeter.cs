@@ -39,7 +39,7 @@ public sealed class MusicMeter
     public void Update(AudioBands b, float onset, float dt)
     {
         time += dt;
-        float e = 0.6f * b.Raw[0] + 0.3f * b.Raw[1] + 0.1f * b.Raw[2];
+        float e = 0.6f * b.Mix[0] + 0.3f * b.Mix[1] + 0.1f * b.Mix[2];
         level += (e - level) * (1 - MathF.Exp(-dt / EnergyTau));
         fast += (e - fast) * (1 - MathF.Exp(-dt / PunchTau));
         reference = MathF.Max(MathF.Max(level, reference * MathF.Exp(-dt / RefTau)), RefFloor);

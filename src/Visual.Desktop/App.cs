@@ -1,4 +1,4 @@
-﻿using ImGuiNET;
+using ImGuiNET;
 using Silk.NET.Input;
 using Silk.NET.Maths;
 using Silk.NET.OpenGL;
@@ -64,6 +64,9 @@ sealed partial class App : IDisposable
     public void Frame(float dt)
     {
         analyzer.InputGain = settings.InputGain;
+        analyzer.Release = settings.AudioRelease;
+        analyzer.Sensitivity = settings.BandSense ?? [];
+        analyzer.MelodySmooth = settings.MelodySmooth;
         analyzer.Update(dt);
         RemoteFrame(dt);
         player.Update(dt);
@@ -84,6 +87,7 @@ sealed partial class App : IDisposable
             (w, h) = (Math.Max(1, (int)(ow * s)), Math.Max(1, (int)(oh * s)));
             (x, y) = ((fb.X - w) / 2, (fb.Y - h) / 2);
         }
+        renderer.Scale = settings.Scale;
         renderer.Render(player, analyzer, dt, x, y, w, h, fb.X, fb.Y, settings.AllowFastStrobe, outSize?.W ?? 0, outSize?.H ?? 0);
         DrawOutput();
         if (!showUi) return;

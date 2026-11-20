@@ -27,6 +27,11 @@ sealed class AppSettings
     public int ViewH { get; set; } = 720;
     /// <summary>Lets strobes go past the safe 3 Hz, up to 20 Hz.</summary>
     public bool AllowFastStrobe { get; set; }
+    /// <summary>Seconds the audio bands take to fall after a hit.</summary>
+    public float AudioRelease { get; set; } = 0.15f;
+    /// <summary>Sensibilidad of bass, mid, high, melody.</summary>
+    public float[] BandSense { get; set; } = [1, 1, 1, 1];
+    public float MelodySmooth { get; set; } = 0.8f;
     public float MaxHz => AllowFastStrobe ? 20f : EffectDefs.SafeStrobeHz;
 }
 
@@ -98,6 +103,9 @@ sealed class Engine : Java.Lang.Object, GLSurfaceView.IRenderer
         float dt = (float)Math.Min(0.1, (now - last) / (double)Stopwatch.Frequency);
         last = now;
         while (Pending.TryDequeue(out var a)) a();
+        Analyzer.Release = settings.AudioRelease;
+        Analyzer.Sensitivity = settings.BandSense ?? [];
+        Analyzer.MelodySmooth = settings.MelodySmooth;
         Analyzer.Update(dt);
         RemoteFrame(dt);
         Player.Update(dt);
@@ -186,6 +194,10 @@ sealed class Engine : Java.Lang.Object, GLSurfaceView.IRenderer
                         if (c["w"]?.GetValue<int>() is { } vw) settings.ViewW = Math.Max(1, vw);
                         if (c["h"]?.GetValue<int>() is { } vh) settings.ViewH = Math.Max(1, vh);
                         if (c["fastStrobe"]?.GetValue<bool>() is { } fs) settings.AllowFastStrobe = fs;
+                        if (c["release"]?.GetValue<float>() is { } rl && float.IsFinite(rl)) settings.AudioRelease = Math.Clamp(rl, 0.02f, 0.4f);
+                        if (c["sense"] is System.Text.Json.Nodes.JsonArray sa && sa.Count == 4)
+                            settings.BandSense = sa.Select(x => x?.GetValue<float>() is float v && float.IsFinite(v) ? Math.Clamp(v, 0.1f, 10f) : 1).ToArray();
+                        if (c["melody"]?.GetValue<float>() is { } ms && float.IsFinite(ms)) settings.MelodySmooth = Math.Clamp(ms, 0.1f, 3f);
                         SaveSettings();
                         break;
                 }
@@ -199,7 +211,7 @@ sealed class Engine : Java.Lang.Object, GLSurfaceView.IRenderer
         var sc = project.Scenes;
         var isf = Player.Current >= 0 && Player.Current < sc.Count ? renderer.Get(sc[Player.Current].Shader).Isf : null;
         remote.State = Remote.State(Player, isf, loadedName, projectNames, shaderFiles, mediaFiles, Analyzer,
-            settings.MaxHz, renderer.StrobeActive, Device(), renderer.AutoDj);
+            settings.MaxHz, renderer.StrobeActive, Device(), renderer.AutoDj, f => renderer.Get(f).Isf, renderer.AutoStrobe);
     }
 
     object Device()
@@ -217,6 +229,9 @@ sealed class Engine : Java.Lang.Object, GLSurfaceView.IRenderer
             settings.ViewW,
             settings.ViewH,
             settings.AllowFastStrobe,
+            settings.AudioRelease,
+            settings.BandSense,
+            settings.MelodySmooth,
             ScreenW = width,
             ScreenH = height,
         };
