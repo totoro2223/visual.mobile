@@ -108,7 +108,7 @@ sealed class Engine : Java.Lang.Object, GLSurfaceView.IRenderer
         Analyzer.MelodySmooth = settings.MelodySmooth;
         Analyzer.Update(dt);
         RemoteFrame(dt);
-        Player.Update(dt);
+        Player.Update(dt, Analyzer.Music.Bpm);
         if (renderer == null) return;
         renderer.Scale = Math.Clamp(settings.Scale, 0.25f, 1f);
         // whole screen as the area; the device canvas is the default for scenes without their own
@@ -141,6 +141,10 @@ sealed class Engine : Java.Lang.Object, GLSurfaceView.IRenderer
                         strobeUntil = c["on"]?.GetValue<bool>() == true ? clock + 1 : 0;
                         break;
                     case "save": SaveProject(); break;
+                    case "surprise": // the scene's inputs are known here
+                        if (renderer != null && c["scene"]?.GetValue<int>() is int si && si >= 0 && si < Player.Project.Scenes.Count)
+                            Surprise.Apply(Player.Project.Scenes[si], renderer.Get(Player.Project.Scenes[si].Shader).Isf, Random.Shared);
+                        break;
                     case "open":
                         if (c["name"]?.GetValue<string>() is { } n && projectNames.Contains(n) && n != loadedName)
                         {
@@ -210,6 +214,7 @@ sealed class Engine : Java.Lang.Object, GLSurfaceView.IRenderer
         stateDue = clock + 0.2;
         var sc = project.Scenes;
         var isf = Player.Current >= 0 && Player.Current < sc.Count ? renderer.Get(sc[Player.Current].Shader).Isf : null;
+        remote.Thumbs = Player.Project.Scenes.Select(s => s.Thumb).ToArray();
         remote.State = Remote.State(Player, isf, loadedName, projectNames, shaderFiles, mediaFiles, Analyzer,
             settings.MaxHz, renderer.StrobeActive, Device(), renderer.AutoDj, f => renderer.Get(f).Isf, renderer.AutoStrobe);
     }

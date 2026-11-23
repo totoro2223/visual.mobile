@@ -1,5 +1,6 @@
 using System.Numerics;
 using ImGuiNET;
+using Silk.NET.OpenGL;
 using Visual.Core;
 
 namespace Visual.Desktop;
@@ -9,6 +10,8 @@ sealed partial class App
     static readonly string[] KindNames = ["Constante", "Lineal", "Audio", "Lineal audio"];
     static readonly string[] ModeNames = ["Reiniciar", "Rebotar", "Rebotar invertido"];
     static readonly string[] BandNames = ["Graves", "Medios", "Agudos", "Melodía", "Nota"];
+    static readonly float[] SyncBeatValues = [16, 8, 4, 2, 1, 0.5f, 0.25f];
+    static readonly string[] SyncNames = ["4 compases", "2 compases", "1 compás", "2 tiempos", "1 tiempo", "1/2 tiempo", "1/4 tiempo"];
     static readonly string[] NoteNames = ["Do", "Do#", "Re", "Re#", "Mi", "Fa", "Fa#", "Sol", "Sol#", "La", "La#", "Si"];
 
     /// <summary>The note band (0..1) as a note name, e.g. "La 4".</summary>
@@ -227,6 +230,8 @@ sealed partial class App
             if (playing) ImGui.PopStyleColor();
             if (ImGui.IsItemHovered()) ImGui.SetTooltip("Pasar a esta escena ahora");
             ImGui.SameLine();
+            ThumbImage(s, ImGui.GetFrameHeight());
+            ImGui.SameLine();
             var dur = s.Duration > 0 ? $"{s.Duration:0.#} s" : "manual";
             var fx = string.Join(" · ", EffectDefs.ActiveLabels(s.Effects));
             var lvl = Scene.LevelNames[s.Level].ToLowerInvariant() + (s.Layers.Count switch { 0 => "", 1 => " · 1 capa", var c => $" · {c} capas" });
@@ -269,6 +274,50 @@ sealed partial class App
         }
     }
 
+    readonly Dictionary<int, uint> thumbTex = []; // by Scene.ThumbKey
+
+    /// <summary>The scene's thumbnail as a GL texture, made once per picture; 0 = none.</summary>
+    unsafe uint ThumbTexture(Scene s)
+    {
+        int k = s.ThumbKey;
+        if (k == 0) return 0;
+        if (thumbTex.TryGetValue(k, out var t)) return t;
+        if (thumbTex.Count > 2 * project.Scenes.Count + 8) // old pictures: start the cache over
+        {
+            foreach (var x in thumbTex.Values) if (x != 0) gl.DeleteTexture(x);
+            thumbTex.Clear();
+        }
+        if (Thumbs.Unpack(s.Thumb) is { } rgb) // rows of 240 bytes: the default 4-byte alignment holds
+        {
+            t = gl.GenTexture();
+            gl.BindTexture(TextureTarget.Texture2D, t);
+            gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
+            gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
+            fixed (byte* p = rgb) gl.TexImage2D(TextureTarget.Texture2D, 0, InternalFormat.Rgb8, Thumbs.W, Thumbs.H, 0, PixelFormat.Rgb, PixelType.UnsignedByte, p);
+        }
+        return thumbTex[k] = t;
+    }
+
+    /// <summary>Small picture of the scene (bigger on hover); an empty space until it has played once.</summary>
+    void ThumbImage(Scene s, float h)
+    {
+        uint t = ThumbTexture(s);
+        var size = new Vector2(h * 16 / 9, h);
+        if (t == 0)
+        {
+            ImGui.Dummy(size);
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip("Sin vista previa: aparece cuando la escena se reproduce");
+            return;
+        }
+        ImGui.Image((IntPtr)t, size, new Vector2(0, 1), new Vector2(1, 0)); // rows come bottom-up
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.BeginTooltip();
+            ImGui.Image((IntPtr)t, new Vector2(240, 135), new Vector2(0, 1), new Vector2(1, 0));
+            ImGui.EndTooltip();
+        }
+    }
+
     /// <summary>Under the playing scene: "12 / 30 s" and a bar up to the change, or just the seconds when it is manual.</summary>
     void SceneProgress(Scene s)
     {
@@ -293,6 +342,14 @@ sealed partial class App
         }
         var scene = project.Scenes[selected];
         ImGui.Text($"Escena {selected + 1}: {scene.Title}");
+        ImGui.SameLine();
+        if (ImGui.Button("Sorpresa")) Surprise.Apply(scene, renderer.Get(scene.Shader).Isf, Random.Shared);
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Valores al azar para el shader y algunos efectos (nunca strobe)");
+        if (scene.Undo != null)
+        {
+            ImGui.SameLine();
+            if (ImGui.Button("Deshacer sorpresa")) Surprise.Undo(scene);
+        }
         if (Section("General###sgen", CScene))
         {
             string sn = scene.Name;
@@ -549,9 +606,9 @@ sealed partial class App
         if (boldName) BoldText(narrowed ? label + " *" : label);
         else ImGui.TextUnformatted(narrowed ? label + " *" : label);
         if (narrowed && ImGui.IsItemHovered()) ImGui.SetTooltip(m.Invert ? $"Rango {lo:0.###} a {hi:0.###}, invertido" : $"Rango {lo:0.###} a {hi:0.###}");
-        if (m.Kind != ModKind.Constant) // thin live bar under the slider: where the modifier has it now
+        if (m.Kind != ModKind.Constant || ps.Extra != null) // thin live bar under the slider: where the modifier has it now
         {
-            float o = m.Apply(ps.Value[0], min, max, time, analyzer.Bands);
+            float o = ps.Eval(min, max, time, analyzer.Bands);
             ImGui.ProgressBar(hi != lo ? (o - lo) / (hi - lo) : 0, new Vector2(sliderW, 3), "");
         }
         if (open)
@@ -572,8 +629,20 @@ sealed partial class App
             }
             if (m.Kind is ModKind.Linear or ModKind.LinearAudio)
             {
-                float speed = m.Speed;
-                if (ImGui.SliderFloat(m.Kind == ModKind.Linear ? "Velocidad (recorridos/s)" : "Velocidad máxima (recorridos/s)", ref speed, 0.001f, 5f, "%.3f", ImGuiSliderFlags.Logarithmic)) m.Speed = speed;
+                bool sync = m.Sync;
+                if (ImGui.Checkbox("Al ritmo (sigue el BPM)", ref sync)) m.Sync = sync;
+                if (ImGui.IsItemHovered()) ImGui.SetTooltip("Cada recorrido dura un número de compases o tiempos y arranca en el \"1\".\nMientras no haya BPM usa la velocidad.");
+                if (m.Sync)
+                {
+                    int bi = Array.IndexOf(SyncBeatValues, m.SyncBeats);
+                    if (bi < 0) bi = 2;
+                    if (ImGui.Combo(m.Kind == ModKind.Linear ? "Un recorrido cada" : "Como máximo un recorrido cada", ref bi, SyncNames, SyncNames.Length)) m.SyncBeats = SyncBeatValues[bi];
+                }
+                else
+                {
+                    float speed = m.Speed;
+                    if (ImGui.SliderFloat(m.Kind == ModKind.Linear ? "Velocidad (recorridos/s)" : "Velocidad máxima (recorridos/s)", ref speed, 0.001f, 5f, "%.3f", ImGuiSliderFlags.Logarithmic)) m.Speed = speed;
+                }
                 int mode = (int)m.Mode;
                 if (ImGui.Combo("Al llegar al borde", ref mode, ModeNames, ModeNames.Length)) m.Mode = (LinearMode)mode;
                 CurveCombo(m);
@@ -585,23 +654,42 @@ sealed partial class App
             }
             if (m.Kind is ModKind.Audio or ModKind.LinearAudio)
             {
-                int band = (int)m.Band;
-                if (ImGui.Combo("Banda", ref band, BandNames, BandNames.Length)) m.Band = (Band)band;
                 if (m.Kind == ModKind.LinearAudio) ImGui.TextDisabled("Avanza más rápido cuanto más pasa la banda del umbral; debajo se queda quieto.");
-                float a = m.Amount;
-                if (m.Kind == ModKind.Audio && ImGui.SliderFloat("Intensidad", ref a, -1f, 1f)) m.Amount = a;
-                float g = m.Gain;
-                if (ImGui.SliderFloat("Ganancia", ref g, 0.1f, 10f, "x%.2f", ImGuiSliderFlags.Logarithmic)) m.Gain = g;
-                float th = m.Threshold;
-                if (ImGui.SliderFloat("Umbral", ref th, 0f, 0.95f)) m.Threshold = th;
-                bool ag = m.AutoGain;
-                if (ImGui.Checkbox("Auto-ganancia", ref ag)) m.AutoGain = ag;
+                AudioControls(m, m.Kind == ModKind.Audio);
+            }
+            if (ps.Extra is not { } x)
+            {
+                if (ImGui.SmallButton("+ Sumar audio")) ps.Extra = new Modifier { Kind = ModKind.Audio };
+                if (ImGui.IsItemHovered()) ImGui.SetTooltip("Suma una banda de audio encima de este modificador (ej. lineal lento + golpe de graves)");
+            }
+            else
+            {
+                ImGui.SeparatorText("Sumar audio");
+                ImGui.PushID("extra");
+                AudioControls(x, true);
+                if (ImGui.SmallButton("Quitar")) ps.Extra = null;
+                ImGui.PopID();
             }
             ImGui.Unindent();
             ImGui.Spacing();
         }
         ImGui.PopID();
         return open;
+    }
+
+    /// <summary>Band, intensity, gain, threshold, auto-gain of an audio modifier.</summary>
+    static void AudioControls(Modifier m, bool amount)
+    {
+        int band = (int)m.Band;
+        if (ImGui.Combo("Banda", ref band, BandNames, BandNames.Length)) m.Band = (Band)band;
+        float a = m.Amount;
+        if (amount && ImGui.SliderFloat("Intensidad", ref a, -1f, 1f)) m.Amount = a;
+        float g = m.Gain;
+        if (ImGui.SliderFloat("Ganancia", ref g, 0.1f, 10f, "x%.2f", ImGuiSliderFlags.Logarithmic)) m.Gain = g;
+        float th = m.Threshold;
+        if (ImGui.SliderFloat("Umbral", ref th, 0f, 0.95f)) m.Threshold = th;
+        bool ag = m.AutoGain;
+        if (ImGui.Checkbox("Auto-ganancia", ref ag)) m.AutoGain = ag;
     }
 
     void BoldText(string s)
@@ -791,6 +879,11 @@ sealed partial class App
         if (fade)
         {
             float s = project.CrossfadeSeconds;
+            int tr = Math.Clamp((int)project.Transition, 0, Project.TransitionNames.Length - 1);
+            if (ImGui.Combo("Transición", ref tr, Project.TransitionNames, Project.TransitionNames.Length)) project.Transition = (Transition)tr;
+            int bi = Math.Max(0, Array.IndexOf(Project.BarChoices, project.CrossfadeBars));
+            if (ImGui.Combo("Duración", ref bi, Project.BarNames, Project.BarNames.Length)) project.CrossfadeBars = Project.BarChoices[bi];
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip("En compases sigue el BPM; mientras no haya BPM usa los segundos");
             if (ImGui.SliderFloat("Duración del fundido (s)", ref s, 0.1f, 10f)) project.CrossfadeSeconds = s;
         }
     }

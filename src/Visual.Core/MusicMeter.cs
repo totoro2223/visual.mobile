@@ -49,6 +49,7 @@ public sealed class MusicMeter
         Punch = Silence ? 0 : MathF.Min(100, fast / reference * 100);
 
         if (Bpm > 0) phase += dt * Bpm / 60;
+        (b.Beats, b.Bpm) = (phase, Bpm);
         // the frame's value fills the 1/100 s slots it covers: the curve doesn't depend on the frame rate
         for (; slotTime + 1.0 / Rate <= time; slotTime += 1.0 / Rate)
         {

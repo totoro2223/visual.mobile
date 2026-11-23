@@ -7,6 +7,9 @@ public sealed class AudioBands
     public readonly float[] Norm = new float[Count];  // Raw divided by its recent peak (auto-gain); the note is the same in both
     /// <summary>For the music's energy (Auto DJ): bass/mid/high as first measured, without tilt or sensitivity, so its calibration holds.</summary>
     public readonly float[] Mix = new float[3];
+    /// <summary>Beats counted by MusicMeter (Bar = 4) and its tempo, 0 = not known yet: modifiers in time with the music.</summary>
+    public double Beats;
+    public float Bpm;
     public float Get(Band b, bool autoGain) => autoGain ? Norm[(int)b] : Raw[(int)b];
 }
 

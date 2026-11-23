@@ -70,7 +70,7 @@ sealed partial class App : IDisposable
         analyzer.MelodySmooth = settings.MelodySmooth;
         analyzer.Update(dt);
         RemoteFrame(dt);
-        player.Update(dt);
+        player.Update(dt, analyzer.Music.Bpm);
         var fb = window.FramebufferSize;
         var (x, y, w, h) = (0, 0, fb.X, fb.Y);
         if (!settings.FillWindow && fb.X > 0 && fb.Y > 0)

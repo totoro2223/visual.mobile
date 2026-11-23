@@ -223,6 +223,7 @@ public sealed unsafe class Renderer : IDisposable
         if (fading) DrawScene(scenes[player.Previous], player.PrevTime, dt, ref sceneB, audio);
         DrawPost(player, audio, dt, fading ? 1 - player.Fade : 0, maxHz);
         MeasureMotion(player, dt);
+        TakeThumb(player);
 
         gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
         gl.Viewport(0, 0, (uint)screenW, (uint)screenH);
@@ -403,7 +404,7 @@ public sealed unsafe class Renderer : IDisposable
     {
         var d = EffectDefs.Get(n);
         var ps = pic.Effects[n];
-        return ps.Off ? d.Default : ps.Mod.Apply(ps.Value[0], d.Min, d.Max, time, bands);
+        return ps.Off ? d.Default : ps.Eval(d.Min, d.Max, time, bands);
     }
 
     void DrawPicture(Picture? scene, double time, float dt, Target target, AudioAnalyzer audio, uint below = 0)
@@ -459,7 +460,7 @@ public sealed unsafe class Renderer : IDisposable
             var v = ps.Value;
             switch (i.Type)
             {
-                case IsfType.Float: gl.Uniform1(loc, ps.Mod.Apply(v[0], i.Min[0], i.Max[0], time, audio.Bands)); break;
+                case IsfType.Float: gl.Uniform1(loc, ps.Eval(i.Min[0], i.Max[0], time, audio.Bands)); break;
                 case IsfType.Long: gl.Uniform1(loc, (int)MathF.Round(v[0])); break;
                 case IsfType.Bool: gl.Uniform1(loc, v[0] > 0.5f ? 1 : 0); break;
                 case IsfType.Event: gl.Uniform1(loc, v[0] > 0.5f ? 1 : 0); v[0] = 0; break; // one-frame pulse
@@ -526,6 +527,7 @@ public sealed unsafe class Renderer : IDisposable
         Bind(1, mixB > 0 ? sceneB.Tex : sceneA.Tex, "sceneB");
         Bind(2, pong.Tex, "prevOut");
         gl.Uniform1(post.Loc(gl, "mixB"), mixB);
+        gl.Uniform1(post.Loc(gl, "trans"), (float)player.Shape);
         gl.Uniform1(post.Loc(gl, "layer"), 0f);
         gl.Uniform2(post.Loc(gl, "RENDERSIZE"), (float)w, (float)h);
         foreach (var d in EffectDefs.All)
@@ -609,6 +611,29 @@ public sealed unsafe class Renderer : IDisposable
         }
         probeScene = s;
         probeNow.CopyTo(probePrev, 0);
+    }
+
+    Target thumbTarget;
+    readonly byte[] thumbPx = new byte[Thumbs.W * Thumbs.H * 4];
+    Scene? thumbOf;
+
+    /// <summary>Once each time a scene plays, 2 s in and between strobe flashes: the finished frame as its thumbnail.</summary>
+    void TakeThumb(Player pl)
+    {
+        var sc = pl.Project.Scenes;
+        var s = pl.Current >= 0 && pl.Current < sc.Count ? sc[pl.Current] : null;
+        if (s == null || pl.SceneTime < 2) { thumbOf = null; return; }
+        if (thumbOf == s || pl.Previous >= 0 || strobeWasOn || Get(s.Shader).Id == 0) return;
+        thumbOf = s;
+        if (thumbTarget.Fbo == 0) thumbTarget = MakeTarget(false, Thumbs.W, Thumbs.H);
+        gl.BindFramebuffer(FramebufferTarget.ReadFramebuffer, ping.Fbo);
+        gl.BindFramebuffer(FramebufferTarget.DrawFramebuffer, thumbTarget.Fbo);
+        gl.BlitFramebuffer(0, 0, w, h, 0, 0, Thumbs.W, Thumbs.H, ClearBufferMask.ColorBufferBit, BlitFramebufferFilter.Linear);
+        gl.BindFramebuffer(FramebufferTarget.ReadFramebuffer, thumbTarget.Fbo);
+        gl.PixelStore(PixelStoreParameter.PackAlignment, 1);
+        fixed (byte* p = thumbPx) gl.ReadPixels(0, 0, Thumbs.W, Thumbs.H, PixelFormat.Rgba, PixelType.UnsignedByte, p);
+        gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
+        s.Thumb = Thumbs.Pack(thumbPx);
     }
 
     /// <summary>Mean change of the color channels of two RGBA pictures, 0..1.</summary>
@@ -706,7 +731,7 @@ public sealed unsafe class Renderer : IDisposable
         gl.DeleteProgram(post.Id);
         gl.DeleteProgram(blend.Id);
         foreach (var s in layerStates.Values) s.Free(gl);
-        foreach (var t in new[] { sceneA, sceneB, ping, pong, probe, layerRaw, layerFx, spare })
+        foreach (var t in new[] { sceneA, sceneB, ping, pong, probe, thumbTarget, layerRaw, layerFx, spare })
             if (t.Fbo != 0) { gl.DeleteFramebuffer(t.Fbo); gl.DeleteTexture(t.Tex); }
         gl.DeleteTexture(waveTex);
         gl.DeleteTexture(fftTex);

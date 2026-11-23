@@ -83,6 +83,10 @@ public static class EffectDefs
         new("chroma", "Aberración cromática", 0, 0.05f, 0),
         new("vignette", "Viñeta", 0, 1, 0),
         new("feedback", "Feedback", 0, 0.98f, 0),
+        // the trail: last frame grown (zoom > 1), turned (turns per frame) and shifted in color each frame
+        new("feedbackZoom", "Feedback zoom", 0.9f, 1.1f, 1.01f),
+        new("feedbackRot", "Feedback giro", -0.02f, 0.02f, 0),
+        new("feedbackHue", "Feedback color", 0, 0.05f, 0),
         new("tint", "Monocolor", 0, 1, 0),          // 1 = everything in one color, keeping light and dark
         new("tintHue", "Monocolor tono", 0, 1, 0),  // 0 red, 0.33 green, 0.66 blue
         new("opacity", "Opacidad", 0, 1, 1),        // 0 = invisible (black)
@@ -108,17 +112,17 @@ public static class EffectDefs
 
     /// <summary>Changed from its default or moving with a modifier.</summary>
     public static bool IsActive(EffectDef d, ParamState ps) =>
-        !ps.Off && (ps.Mod.Kind != ModKind.Constant || MathF.Abs(ps.Mod.Apply(ps.Value[0], d.Min, d.Max, 0, NoSound) - d.Default) > 1e-4f);
+        !ps.Off && (ps.Mod.Kind != ModKind.Constant || ps.Extra != null || MathF.Abs(ps.Mod.Apply(ps.Value[0], d.Min, d.Max, 0, NoSound) - d.Default) > 1e-4f);
 
     static readonly AudioBands NoSound = new();
 
     /// <summary>Effects shown and moved together (strobe, mask, monocolor): one in use pulls in its siblings.</summary>
     public static string Group(string name) =>
-        name.StartsWith("strobe") ? "strobe" : name.StartsWith("mask") ? "mask" : name.StartsWith("tint") ? "tint" : name.StartsWith("tilt") ? "tilt" : name;
+        name.StartsWith("strobe") ? "strobe" : name.StartsWith("mask") ? "mask" : name.StartsWith("tint") ? "tint" : name.StartsWith("tilt") ? "tilt" : name.StartsWith("feedback") ? "feedback" : name;
 
     /// <summary>Short names of the effects a scene is using; the strobe counts once, by its rate.</summary>
     public static string[] ActiveLabels(Dictionary<string, ParamState> fx) => All
-        .Where(d => d.Name is not ("strobeDuty" or "strobeIntensity" or "strobeMode" or "strobeHue" or "tintHue" or "maskX" or "maskY" or "maskSoft" or "maskRepX" or "maskRepY" or "maskSepX" or "maskSepY" or "tiltY" or "tiltPersp")
+        .Where(d => d.Name is not ("strobeDuty" or "strobeIntensity" or "strobeMode" or "strobeHue" or "tintHue" or "maskX" or "maskY" or "maskSoft" or "maskRepX" or "maskRepY" or "maskSepX" or "maskSepY" or "tiltY" or "tiltPersp" or "feedbackZoom" or "feedbackRot" or "feedbackHue")
                     && fx.TryGetValue(d.Name, out var ps) && IsActive(d, ps))
         .Select(d => d.Name == "strobeRate" ? "Strobe" : d.Name.StartsWith("mask") ? "Máscara" : d.Name.StartsWith("tilt") ? "Inclinación" : d.Label)
         .Distinct()
@@ -130,13 +134,36 @@ public static class EffectDefs
         uniform sampler2D sceneB;
         uniform sampler2D prevOut;
         uniform float mixB;
+        uniform float trans; // Transition shape while mixB is between 0 and 1
         uniform float layer; // 1 = a layer: opacity, mask and its shader's alpha go to the alpha (premultiplied), for the blend
         uniform vec2 RENDERSIZE;
-        uniform float brightness, contrast, saturation, hue, zoom, rotation, kaleido, chroma, vignette, feedback, tint, tintHue, opacity, strobe, strobeMode, strobeHue, maskX, maskY, maskW, maskH, maskSoft, maskRepX, maskRepY, maskSepX, maskSepY, tiltX, tiltY, tiltPersp;
+        uniform float brightness, contrast, saturation, hue, zoom, rotation, kaleido, chroma, vignette, feedback, tint, tintHue, opacity, feedbackZoom, feedbackRot, feedbackHue, strobe, strobeMode, strobeHue, maskX, maskY, maskW, maskH, maskSoft, maskRepX, maskRepY, maskSepX, maskSepY, tiltX, tiltY, tiltPersp;
         varying vec2 isf_FragNormCoord;
         const float TAU = 6.2831853;
 
-        vec3 scene(vec2 uv) { return mix(texture2D(sceneA, uv).rgb, texture2D(sceneB, uv).rgb, mixB); }
+        float hash(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
+
+        // how much of the old scene shows here: mixB at the start (1) and end (0) of the change, whatever its shape
+        float oldPart() {
+            if (trans < 0.5 || trans > 4.5 || mixB <= 0.0 || mixB >= 1.0) return mixB;
+            vec2 s = isf_FragNormCoord, asp = vec2(RENDERSIZE.x / RENDERSIZE.y, 1.0);
+            float v = trans < 1.5 ? s.x                                              // barrido: left to right
+                : trans < 2.5 ? length((s - 0.5) * asp) / length(asp * 0.5)         // circle from the center
+                : trans < 3.5 ? fract(s.x * 8.0)                                     // blinds
+                : hash(floor(s * RENDERSIZE / 6.0));                                 // dissolve
+            float q = 1.0 - mixB, e = 0.05, a = q * (1.0 + e) - e;
+            return smoothstep(a, a + e, v);
+        }
+
+        vec3 scene(vec2 uv) {
+            vec2 ua = uv, ub = uv;
+            float q = 1.0 - mixB;
+            if (mixB > 0.0 && mixB < 1.0 && trans > 4.5) {
+                if (trans < 5.5) { vec2 n = RENDERSIZE / (1.0 + 40.0 * sin(3.14159 * q)); ua = ub = (floor(uv * n) + 0.5) / n; } // pixels
+                else { ub = (uv - 0.5) / (1.0 + 2.0 * q) + 0.5; ua = (uv - 0.5) / (1.0 + mixB) + 0.5; } // zoom through
+            }
+            return mix(texture2D(sceneA, ua).rgb, texture2D(sceneB, ub).rgb, oldPart());
+        }
 
         float onPlane = 1.0;
 
@@ -186,7 +213,13 @@ public static class EffectDefs
             c = (c + brightness - 0.5) * contrast + 0.5;
             c = mix(vec3(dot(c, vec3(0.299, 0.587, 0.114))), c, saturation);
             c = hueShift(c, hue);
-            c = max(c, texture2D(prevOut, (isf_FragNormCoord - 0.5) * 0.99 + 0.5).rgb * feedback);
+            if (feedback > 0.0) {
+                vec2 asp = vec2(RENDERSIZE.x / RENDERSIZE.y, 1.0);
+                float fa = feedbackRot * TAU;
+                vec2 fp = (mat2(cos(fa), sin(fa), -sin(fa), cos(fa)) * ((isf_FragNormCoord - 0.5) * asp)) / max(feedbackZoom, 0.01) / asp + 0.5;
+                float inside = step(abs(fp.x - 0.5), 0.5) * step(abs(fp.y - 0.5), 0.5); // shrinking: nothing comes from outside
+                c = max(c, hueShift(texture2D(prevOut, fp).rgb, feedbackHue) * feedback * inside);
+            }
             c *= 1.0 - vignette * smoothstep(0.2, 0.8, length(isf_FragNormCoord - 0.5));
             c = mix(c, dot(c, vec3(0.299, 0.587, 0.114)) * pure(tintHue), tint);
             if (layer < 0.5) c *= opacity;

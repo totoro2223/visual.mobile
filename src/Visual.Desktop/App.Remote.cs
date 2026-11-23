@@ -41,6 +41,10 @@ sealed partial class App
                         strobeUntil = c["on"]?.GetValue<bool>() == true ? remoteClock + 1 : 0;
                         break;
                     case "save": SaveProject(); break;
+                    case "surprise": // the scene's inputs are known here
+                        if (c["scene"]?.GetValue<int>() is int si && si >= 0 && si < player.Project.Scenes.Count)
+                            Surprise.Apply(player.Project.Scenes[si], renderer.Get(player.Project.Scenes[si].Shader).Isf, Random.Shared);
+                        break;
                     case "open":
                         if (c["name"]?.GetValue<string>() is { } n && projectNames.Contains(n) && n != loadedName)
                         {
@@ -86,6 +90,7 @@ sealed partial class App
         stateDue = remoteClock + 0.2;
         var scenes = project.Scenes;
         var isf = player.Current >= 0 && player.Current < scenes.Count ? renderer.Get(scenes[player.Current].Shader).Isf : null;
+        remote.Thumbs = player.Project.Scenes.Select(s => s.Thumb).ToArray();
         remote.State = Remote.State(player, isf, loadedName, projectNames, shaderFiles, mediaFiles, analyzer,
             settings.AllowFastStrobe ? 20 : EffectDefs.SafeStrobeHz, renderer.StrobeActive, new { settings.Scale, settings.ExpandDefines }, renderer.AutoDj, f => renderer.Get(f).Isf, renderer.AutoStrobe);
     }

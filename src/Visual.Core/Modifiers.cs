@@ -19,6 +19,10 @@ public sealed class Modifier
     public LinearMode Mode { get; set; }
     public Ease Ease { get; set; }
     public int Steps { get; set; } = 4; // Steps / random curves: values per sweep, 2..16
+    /// <summary>In time with the music: a sweep every <see cref="SyncBeats"/> beats instead of Speed (Speed while there is no BPM yet).
+    /// Linear then starts at the low end on the "1" instead of at the slider value.</summary>
+    public bool Sync { get; set; }
+    public float SyncBeats { get; set; } = 4;
 
     // Audio
     public Band Band { get; set; }
@@ -50,6 +54,9 @@ public sealed class Modifier
     float Level(AudioBands bands) =>
         Math.Clamp((bands.Get(Band, AutoGain) * Gain - Threshold) / (1 - Math.Min(Threshold, 0.99f)), 0, 1);
 
+    /// <summary>"Sumar audio": how far the band pushes now, in the parameter's units (negative = down).</summary>
+    public float Push(float range, AudioBands bands) => Level(bands) * (float.IsFinite(Amount) ? Math.Clamp(Amount, -1, 1) : 0) * (Invert ? -1 : 1) * range;
+
     public float Apply(float value, float min, float max, double time, AudioBands bands)
     {
         var (lo, hi) = Range(min, max);
@@ -61,12 +68,14 @@ public sealed class Modifier
                 double start = range != 0 ? (Math.Clamp(value, lo, hi) - lo) / range : 0;
                 int steps = Math.Clamp(Steps, 2, 16);
                 if (Invert) start = 1 - start;
-                double ph = Curves.Find(Ease, steps, start); // starts at the slider value either way
-                if (Kind == ModKind.Linear) ph += time * Speed;
+                bool sync = Sync && bands.Bpm > 0;
+                double beats = float.IsFinite(SyncBeats) ? Math.Clamp(SyncBeats, 0.25, 64) : 4;
+                double ph = sync && Kind == ModKind.Linear ? 0 : Curves.Find(Ease, steps, start); // starts at the slider value either way
+                if (Kind == ModKind.Linear) ph += sync ? bands.Beats / beats : time * Speed;
                 else
                 {
                     if (!(time >= last)) phase = ph; // first frame, or the scene started again
-                    else phase += Math.Min(time - last, 0.1) * Speed * Level(bands); // same time twice (UI + render) = no step
+                    else phase += Math.Min(time - last, 0.1) * (sync ? bands.Bpm / 60 / beats : Speed) * Level(bands); // same time twice (UI + render) = no step
                     last = time;
                     ph = phase;
                 }
@@ -169,8 +178,19 @@ public sealed class ParamState
 {
     public float[] Value { get; set; } = [0f];
     public Modifier Mod { get; set; } = new();
+    /// <summary>"Sumar audio": an audio band added on top of Mod, inside Mod's range (null = none).</summary>
+    public Modifier? Extra { get; set; }
     /// <summary>Effects only: switched off, acts as its default but keeps the settings.</summary>
     public bool Off { get; set; }
 
-    public ParamState Clone() => new() { Value = (float[])Value.Clone(), Mod = Mod.Clone(), Off = Off };
+    public ParamState Clone() => new() { Value = (float[])Value.Clone(), Mod = Mod.Clone(), Extra = Extra?.Clone(), Off = Off };
+
+    /// <summary>The value now: Mod, plus Extra's push kept inside the range.</summary>
+    public float Eval(float min, float max, double time, AudioBands bands)
+    {
+        float v = Mod.Apply(Value[0], min, max, time, bands);
+        if (Extra == null) return v;
+        var (lo, hi) = Mod.Range(min, max);
+        return Math.Clamp(v + Extra.Push(hi - lo, bands), lo, hi);
+    }
 }

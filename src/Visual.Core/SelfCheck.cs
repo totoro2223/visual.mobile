@@ -68,6 +68,22 @@ public static class SelfCheck
         Near(new Modifier { Kind = ModKind.Audio, Amount = 1, Threshold = 0.9f, From = 0.5f, To = 0.6f }.Apply(9, 0, 10, 0, bands), 5); // silence rests at From
         Near(new Modifier { Kind = ModKind.Audio, Amount = -1, Threshold = 0.9f, From = 0.5f, To = 0.6f }.Apply(0, 0, 10, 0, bands), 6); // negative rests at To
         Near(new Modifier { Kind = ModKind.Audio, Amount = -0.5f, Gain = 2, From = 0.5f, To = 0.6f }.Apply(0, 0, 10, 0, bands), 5.5f);
+        // in time with the music: SyncBeats beats per sweep, from the low end on the "1"; no BPM yet = Speed from the slider value
+        var sy = new Modifier { Kind = ModKind.Linear, Speed = 1, Sync = true, SyncBeats = 4 };
+        Near(sy.Apply(7, 0, 10, 0.25, bands), 9.5f);
+        (bands.Bpm, bands.Beats) = (120, 6);
+        Near(sy.Apply(7, 0, 10, 0.25, bands), 5);
+        bands.Beats = 1;
+        Near(sy.Apply(7, 0, 10, 0.25, bands), 2.5f);
+        (bands.Bpm, bands.Beats) = (0, 0);
+        // "Sumar audio": pushed on top of Mod, kept inside its range
+        var ex = new ParamState { Value = [2], Extra = new Modifier { Kind = ModKind.Audio, Amount = 0.3f, Gain = 2 } };
+        Near(ex.Eval(0, 10, 0, bands), 5);
+        ex.Mod.To = 0.4f;
+        Near(ex.Eval(0, 10, 0, bands), 3.2f); // the push is a fraction of that range too
+        ex.Extra.Amount = -0.5f;
+        Near(ex.Eval(0, 10, 0, bands), 0);
+        Check(ex.Clone().Extra is { Amount: -0.5f } c && c != ex.Extra, "sumar audio: se copia");
         CurvesCheck(bands);
 
         AutoStrobeCheck();
@@ -92,12 +108,53 @@ public static class SelfCheck
         var (cc, cs) = Renderer.Place(cpl, half, 1920, 1080);
         Check(cc == (0.125f, 0f, 0.75f, 1f), "lienzo propio 4:3");
         Check(MathF.Abs(cs.X - 0.0625f) < 1e-5f && MathF.Abs(cs.W - 0.625f) < 1e-5f, "el recuadro se desliza durante el fundido");
+        // transitions: "Al azar" picks a real shape; in bars the change follows the BPM (1 bar at 120 = 2 s), else the seconds
+        var tpl = new Player();
+        tpl.Start(new Project { Crossfade = true, CrossfadeSeconds = 4, CrossfadeBars = 1, Transition = Transition.Random, Scenes = [new Scene(), new Scene()] });
+        tpl.GoTo(1);
+        Check(tpl.Shape < Transition.Random, "transición al azar elige una forma");
+        tpl.Update(1, 120);
+        Near(tpl.Fade, 0.5f);
+        tpl.GoTo(0);
+        tpl.Update(1);
+        Near(tpl.Fade, 0.25f);
+        Check(Project.TransitionNames.Length == Enum.GetValues<Transition>().Length && Project.BarNames.Length == Project.BarChoices.Length, "transiciones: un nombre por opción");
+        ThumbSurpriseCheck();
 
         Check(BandOf(100) == 0, "100 Hz -> graves");
         Check(BandOf(1000) == 1, "1 kHz -> medios");
         Check(BandOf(8000) == 2, "8 kHz -> agudos");
         Check(BandOf(1800) == 1 && BandOf(2500) == 2, "corte medios/agudos en 2 kHz");
         AnalyzerCheck();
+    }
+
+    static void ThumbSurpriseCheck()
+    {
+        var px = new byte[Thumbs.W * Thumbs.H * 4];
+        for (int i = 0; i < px.Length; i++) px[i] = (byte)(i * 7);
+        var rgb = Thumbs.Unpack(Thumbs.Pack(px));
+        Check(rgb != null && rgb[0] == px[0] && rgb[^1] == px[^2] && rgb[3] == px[4], "miniatura: ida y vuelta");
+        Check(Thumbs.Unpack("no es") == null && Thumbs.Unpack(Convert.ToBase64String([1, 2, 3])) == null, "miniatura: texto roto = ninguna");
+        var bmp = Thumbs.Bmp(rgb!);
+        Check(bmp.Length == 54 + Thumbs.W * Thumbs.H * 3 && bmp[0] == 'B' && BitConverter.ToInt32(bmp, 18) == Thumbs.W && bmp[54] == rgb![2], "miniatura: BMP");
+        var sc = new Scene { Thumb = Thumbs.Pack(px) };
+        int k = sc.ThumbKey;
+        Check(k != 0 && k == sc.ThumbKey && new Scene().ThumbKey == 0, "miniatura: clave estable");
+
+        var isf = IsfShader.Parse("""/*{"INPUTS":[{"NAME":"a","TYPE":"float","MIN":2,"MAX":5,"DEFAULT":3},{"NAME":"b","TYPE":"long","VALUES":[1,4],"LABELS":["x","y"],"DEFAULT":1},{"NAME":"c","TYPE":"color","DEFAULT":[1,0,0,1]}]}*/ void main(){}""");
+        var s = new Scene();
+        isf.EnsureParams(s.Params);
+        s.EnsureEffects();
+        var before = System.Text.Json.JsonSerializer.Serialize(s.Params) + System.Text.Json.JsonSerializer.Serialize(s.Effects);
+        for (int seed = 0; seed < 40; seed++)
+        {
+            Surprise.Apply(s, isf, new Random(seed));
+            Check(s.Params["a"].Value[0] is >= 2 and <= 5 && s.Params["b"].Value[0] is 1 or 4 && s.Params["c"].Value.Length == 4, "sorpresa: dentro del rango");
+            Check(s.Effects["strobeRate"].Value[0] == 0 && s.Effects["opacity"].Value[0] == 1 && s.Effects["maskW"].Value[0] == 1, "sorpresa: sin strobe ni máscara");
+            Check(EffectDefs.All.Count(d => EffectDefs.IsActive(d, s.Effects[d.Name])) >= 1, "sorpresa: algún efecto");
+            Check(Surprise.Undo(s) && !Surprise.Undo(s), "sorpresa: deshacer una vez");
+            Check(System.Text.Json.JsonSerializer.Serialize(s.Params) + System.Text.Json.JsonSerializer.Serialize(s.Effects) == before, "sorpresa: deshacer vuelve a lo de antes");
+        }
     }
 
     static void CurvesCheck(AudioBands bands)

@@ -26,6 +26,8 @@ public sealed class RemoteServer : IDisposable
     public bool Running => listener != null;
     /// <summary>Latest state JSON, published by the render thread.</summary>
     public volatile string State = "{}";
+    /// <summary>Each scene's Thumb, published with State.</summary>
+    public volatile string?[] Thumbs = [];
     public readonly ConcurrentQueue<JsonObject> Commands = new();
     /// <summary>GET /project waits on these; the render thread answers with (name, ProjectStore.ToJson) via AnswerExports.</summary>
     public readonly ConcurrentQueue<TaskCompletionSource<(string Name, string Json)>> ExportRequests = new();
@@ -137,6 +139,12 @@ public sealed class RemoteServer : IDisposable
             {
                 case ("GET", "/"):
                     await Reply(s, 200, "text/html; charset=utf-8", Page);
+                    break;
+                case ("GET", "/thumb"): // ?i=scene; the address also carries its ThumbKey, so it can be kept
+                    var thumbs = Thumbs;
+                    if (int.TryParse(query["i"], out int ti) && ti >= 0 && ti < thumbs.Length && Visual.Core.Thumbs.Unpack(thumbs[ti]) is { } rgb)
+                        await Reply(s, 200, "image/bmp", Visual.Core.Thumbs.Bmp(rgb), "Cache-Control: max-age=86400");
+                    else await Reply(s, 404, "text/plain", "no thumb"u8.ToArray());
                     break;
                 case ("GET", "/state"):
                     await Reply(s, 200, "application/json", Encoding.UTF8.GetBytes(State));
@@ -270,13 +278,17 @@ public static class Remote
             Shaders = shaders,
             pl.Current,
             pl.SceneTime,
-            Scenes = p.Scenes.Select(s => new { s.Shader, s.Title, s.Duration, s.Intensity, s.Level, Fx = EffectDefs.ActiveLabels(s.Effects), Layers = s.Layers.Count }),
+            Scenes = p.Scenes.Select(s => new { s.Shader, s.Title, s.Duration, s.Intensity, s.Level, Fx = EffectDefs.ActiveLabels(s.Effects), Layers = s.Layers.Count, Th = s.ThumbKey }),
             Name = scene?.Name,
             Media = scene?.Media,
             MediaFiles = media,
             p.Shuffle,
             p.Crossfade,
             p.CrossfadeSeconds,
+            p.Transition,
+            p.CrossfadeBars,
+            Project.TransitionNames,
+            CanUndo = scene?.Undo != null,
             Inputs = Inputs(isf),
             Params = scene?.Params,
             EffectDefs = EffectDefs.All,
@@ -414,6 +426,8 @@ public static class Remote
                 p.Shuffle = c["shuffle"]?.GetValue<bool>() ?? p.Shuffle;
                 p.Crossfade = c["crossfade"]?.GetValue<bool>() ?? p.Crossfade;
                 p.CrossfadeSeconds = Math.Clamp(c["crossfadeSeconds"]?.GetValue<float>() ?? p.CrossfadeSeconds, 0.1f, 10f);
+                if (c["transition"]?.GetValue<int>() is int tr && tr >= 0 && tr <= (int)Transition.Random) p.Transition = (Transition)tr;
+                if (c["crossfadeBars"]?.GetValue<float>() is float fb && Project.BarChoices.Contains(fb)) p.CrossfadeBars = fb;
                 break;
             case "music": // the phone's Tap sends the tempo it measured (Wi-Fi delays would spoil single taps)
                 if (c["bpm"] != null) music?.SetTempo(Float(c, "bpm"), Int(c, "beat"));
@@ -430,7 +444,10 @@ public static class Remote
             case "remove":
                 if (Int(c, "i") is var i && i >= 0 && i < p.Scenes.Count) pl.Remove(i);
                 break;
-            default: return op;
+            case "surpriseUndo":
+                if (SceneAt(p, Int(c, "scene")) is { } us) Surprise.Undo(us);
+                break;
+            default: return op; // also "surprise": the host knows the shader's inputs
         }
         return null;
     }

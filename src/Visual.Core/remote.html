@@ -49,6 +49,7 @@ input[type=range]{height:32px}
 .srow{display:flex;align-items:center;gap:6px;padding:8px;margin:6px 0;background:#262626;border-radius:8px}
 .srow.cur{outline:2px solid var(--acc)}
 .sinfo{flex:1;min-width:0}
+.thumb{width:56px;height:32px;flex:none;border-radius:4px;background:#111;object-fit:cover}
 .sinfo>div:first-child{overflow-wrap:anywhere}
 .sinfo small{display:block;color:#5e8;margin-top:2px;font-size:13px}
 .prog{font-size:13px;color:var(--mut);margin-top:4px}
@@ -143,7 +144,7 @@ async function poll() {
     S = await r.json();
     document.getElementById('err').textContent = '';
     const s = JSON.stringify([tab, S.Project, S.Loaded, S.Projects, S.Shaders, S.Current, S.Scenes, S.Shuffle, S.Crossfade,
-      S.CrossfadeSeconds, S.Inputs, S.Params, S.Effects, S.AutoStrobe, S.AutoDj, S.MaxHz, S.Device, S.Canvas, S.Quality, S.Name, S.Media, S.MediaFiles, S.Layers]);
+      S.CrossfadeSeconds, S.Inputs, S.Params, S.Effects, S.AutoStrobe, S.AutoDj, S.MaxHz, S.Device, S.Canvas, S.Quality, S.Name, S.Media, S.MediaFiles, S.Layers, S.Transition, S.CrossfadeBars, S.CanUndo]);
     // don't rebuild under the user's finger: wait until they stop touching / typing
     const typing = document.activeElement && document.activeElement.matches('select,input[type=number],input[type=text]');
     if (s !== sig && !busy && !typing && Date.now() - lastEdit > 1500) { sig = s; render(); }
@@ -309,6 +310,17 @@ function curvePick(md, changed) {
   EASES_V.forEach((v, i) => list.append(el('button', { class: 'sm' + (v === cur ? ' on' : ''), onclick: () => { md.Ease = v; changed(); } }, curveIcon(v, steps), EASES[i])));
   return el('div', { class: 'curvepick' }, b, list);
 }
+// same as Transition, Project.BarChoices / BarNames in C#
+const TRANS_V = ['Fade', 'Wipe', 'Circle', 'Blinds', 'Dissolve', 'Pixels', 'Zoom', 'Random'];
+const BAR_V = [0, 0.5, 1, 2, 4], BAR_N = ['En segundos', '1/2 compás', '1 compás', '2 compases', '4 compases'];
+const SYNC_V = [16, 8, 4, 2, 1, 0.5, 0.25], SYNC_N = ['4 compases', '2 compases', '1 compás', '2 tiempos', '1 tiempo', '1/2 tiempo', '1/4 tiempo'];
+// band, intensity, gain, threshold, auto-gain of an audio modifier (also "Sumar audio")
+const audCtl = (m, amount, go) => [
+  sel('Banda', BANDS, Math.max(0, BANDS_V.indexOf(m.Band)), i => { m.Band = BANDS_V[i]; go(); }),
+  ...(amount ? [slider('Intensidad', m.Amount, -1, 1, x => { m.Amount = x; go(); })] : []),
+  slider('Ganancia', m.Gain, 0.1, 10, x => { m.Gain = x; go(); }, true),
+  slider('Umbral', m.Threshold, 0, 0.95, x => { m.Threshold = x; go(); }),
+  chk('Auto-ganancia', m.AutoGain, b => { m.AutoGain = b; go(); })];
 function paramEd(label, ps, min, max, labels, key, mk, opt = {}) {
   const go = () => edit(key, mk()), wrap = el('div');
   const draw = () => {
@@ -339,18 +351,19 @@ function paramEd(label, ps, min, max, labels, key, mk, opt = {}) {
         box.append(chk(md.Kind !== 'Audio' ? 'Invertir (recorre al revés)' : 'Invertir (más sonido = menos valor)', !!md.Invert, b => { md.Invert = b; go(); draw(); }));
       const lin = md.Kind === 'Linear' || md.Kind === 'LinearAudio', aud = md.Kind === 'Audio' || md.Kind === 'LinearAudio';
       if (lin) box.append(
-        slider(md.Kind === 'Linear' ? 'Velocidad (recorridos/s)' : 'Velocidad máxima (recorridos/s)', md.Speed, 0.001, 5, x => { md.Speed = x; go(); }, true),
+        chk('Al ritmo (sigue el BPM)', !!md.Sync, b => { md.Sync = b; go(); draw(); }),
+        md.Sync ? sel(md.Kind === 'Linear' ? 'Un recorrido cada' : 'Como máximo un recorrido cada', SYNC_N, Math.max(0, SYNC_V.indexOf(md.SyncBeats ?? 4)), i => { md.SyncBeats = SYNC_V[i]; go(); })
+          : slider(md.Kind === 'Linear' ? 'Velocidad (recorridos/s)' : 'Velocidad máxima (recorridos/s)', md.Speed, 0.001, 5, x => { md.Speed = x; go(); }, true),
         sel('Al llegar al borde', ['Reiniciar', 'Rebotar', 'Rebotar invertido'], Math.max(0, MODES_V.indexOf(md.Mode)), i => { md.Mode = MODES_V[i]; go(); }),
         row('Curva', curvePick(md, () => { go(); draw(); })));
       if (lin && /Steps|Random/.test(md.Ease || ''))
         box.append(slider(md.Ease === 'Steps' ? 'Pasos' : 'Valores por recorrido', md.Steps ?? 4, 2, 16, x => { md.Steps = Math.round(x); go(); }));
-      if (aud) box.append(
-        sel('Banda', BANDS, BANDS_V.indexOf(md.Band), i => { md.Band = BANDS_V[i]; go(); }),
-        ...(md.Kind === 'Audio' ? [slider('Intensidad', md.Amount, -1, 1, x => { md.Amount = x; go(); })]
-          : [hint('Avanza más rápido cuanto más pasa la banda del umbral; debajo se queda quieto.')]),
-        slider('Ganancia', md.Gain, 0.1, 10, x => { md.Gain = x; go(); }, true),
-        slider('Umbral', md.Threshold, 0, 0.95, x => { md.Threshold = x; go(); }),
-        chk('Auto-ganancia', md.AutoGain, b => { md.AutoGain = b; go(); }));
+      if (aud) box.append(...(md.Kind === 'Audio' ? [] : [hint('Avanza más rápido cuanto más pasa la banda del umbral; debajo se queda quieto.')]),
+        ...audCtl(md, md.Kind === 'Audio', go));
+      if (!ps.Extra) box.append(el('div', { class: 'row' }, btn('+ Sumar audio', () => {
+        ps.Extra = { Kind: 'Audio', Band: 'Bass', Amount: 0.5, Gain: 1, Threshold: 0, AutoGain: false }; go(); draw(); })));
+      else box.append(el('div', { class: 'row' }, el('label', { textContent: 'Sumar audio' }), btn('Quitar', () => { ps.Extra = null; go(); draw(); })),
+        ...audCtl(ps.Extra, true, go));
       parts.push(box);
     }
     wrap.classList.toggle('open', open);
@@ -420,6 +433,8 @@ function renderLive() {
     dur.title = dur.ariaLabel = 'Duración (s), 0 = manual';
     add(el('div', { class: 'srow' + (cur ? ' cur' : '') },
       el('button', { class: 'sm play' + (cur ? ' on' : ''), textContent: '▶', ariaLabel: 'Pasar a esta escena', onclick: () => post({ op: 'goto', i }) }),
+      s.Th ? el('img', { class: 'thumb', alt: '', src: `/thumb?k=${encodeURIComponent(K)}&i=${i}&v=${s.Th}` })
+        : el('span', { class: 'thumb', title: 'Sin vista previa: aparece cuando la escena se reproduce' }),
       el('div', { class: 'sinfo' }, el('div', { textContent: (i + 1) + '. ' + s.Title }, el('small', { textContent: ' · ' + LEVELS[s.Level].toLowerCase() })),
         ...(s.Fx.length ? [el('small', { textContent: s.Fx.join(' · ') })] : []),
         ...(cur ? [el('div', { id: 'sprog', class: 'prog' }, el('span'), el('div', { class: 'bar' }, el('i')))] : [])),
@@ -504,6 +519,10 @@ function renderScene() {
       btn('Subir', () => post({ op: 'move', i, to: i - 1 })),
       btn('Bajar', () => post({ op: 'move', i, to: i + 1 })),
       btn('Quitar', () => { if (confirm('¿Quitar esta escena del proyecto?')) post({ op: 'remove', i }); }, 'danger')));
+    add(el('div', { class: 'row' },
+      btn('Sorpresa', () => post({ op: 'surprise', scene: i })),
+      ...(S.CanUndo ? [btn('Deshacer sorpresa', () => post({ op: 'surpriseUndo', scene: i }))] : [])),
+      hint('Sorpresa: valores al azar para el shader y algunos efectos (nunca strobe).'));
     const cv = S.Canvas, setCv = v => post({ op: 'canvas', scene: i, value: v });
     card('canvas', 'Lienzo', 'c-scene', !!cv, cv ? 'propio de esta escena' : 'usa el global');
     // starts as a copy of the global canvas, as pixels so X/Y/W/H show up already filled in (same rectangle as Renderer.Fit)
@@ -591,11 +610,11 @@ const armed = new Set();
 // in use (with their siblings: strobe, mask, monocolor) apart from the rest, like the PC
 function fxEd(effects, base, kp) {
   const defs = S.EffectDefs.filter(d => effects && effects[d.Name]);
-  const grp = n => /^strobe/.test(n) ? 'strobe' : /^mask/.test(n) ? 'mask' : /^tint/.test(n) ? 'tint' : /^tilt/.test(n) ? 'tilt' : n;
+  const grp = n => /^strobe/.test(n) ? 'strobe' : /^mask/.test(n) ? 'mask' : /^tint/.test(n) ? 'tint' : /^tilt/.test(n) ? 'tilt' : /^feedback/.test(n) ? 'feedback' : n;
   const inUse = d => { // same as EffectDefs.IsActive
     const ps = effects[d.Name];
     if (ps.Off) return false;
-    if (ps.Mod.Kind !== 'Constant') return true;
+    if (ps.Mod.Kind !== 'Constant' || ps.Extra) return true;
     const [lo, hi] = range(ps.Mod, d.Min, d.Max);
     return Math.abs(Math.min(hi, Math.max(lo, ps.Value[0])) - d.Default) > 1e-4;
   };
@@ -986,10 +1005,15 @@ function renderProj() {
     btn('Descargar JSON', () => el('a', { href: '/project?k=' + encodeURIComponent(K), download: '' }).click()),
     btn('Subir proyecto (.json)…', () => pf.click())),
     hint('Solo la configuración: los shaders y videos tienen que estar en el equipo. Si el nombre ya existe, se guarda como "Nombre 2".'));
-  const pj = () => edit('proj', { op: 'project', shuffle: S.Shuffle, crossfade: S.Crossfade, crossfadeSeconds: S.CrossfadeSeconds });
+  const pj = () => edit('proj', { op: 'project', shuffle: S.Shuffle, crossfade: S.Crossfade, crossfadeSeconds: S.CrossfadeSeconds,
+    transition: TRANS_V.indexOf(S.Transition), crossfadeBars: S.CrossfadeBars });
   add(chk('Orden aleatorio', S.Shuffle, b => { S.Shuffle = b; pj(); }),
-      chk('Fundido entre escenas', S.Crossfade, b => { S.Crossfade = b; pj(); }),
-      slider('Duración del fundido (s)', S.CrossfadeSeconds, 0.1, 10, x => { S.CrossfadeSeconds = x; pj(); }));
+      chk('Fundido entre escenas', S.Crossfade, b => { S.Crossfade = b; pj(); render(); }));
+  if (S.Crossfade) add(
+      sel('Transición', S.TransitionNames, Math.max(0, TRANS_V.indexOf(S.Transition)), j => { S.Transition = TRANS_V[j]; pj(); }),
+      sel('Duración', BAR_N, Math.max(0, BAR_V.indexOf(S.CrossfadeBars)), j => { S.CrossfadeBars = BAR_V[j]; pj(); }),
+      slider('Duración del fundido (s)', S.CrossfadeSeconds, 0.1, 10, x => { S.CrossfadeSeconds = x; pj(); }),
+      hint('En compases sigue el BPM; mientras no haya BPM usa los segundos.'));
 
   const a = S.AutoStrobe, go = () => edit('auto', { op: 'autostrobe', value: a }), now = () => { go(); S.AutoStrobe = a; render(); }; // S may be a newer poll's: show this edit now
   const C = a.Configs || (a.Configs = [{}]);

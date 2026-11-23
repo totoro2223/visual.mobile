@@ -23,6 +23,9 @@ public abstract class Picture
                            && Params.Values.Concat(Effects.Values).All(ps => ps?.Value != null && ps.Mod != null);
 }
 
+/// <summary>Shape of the change between scenes; Random picks one of the others each time.</summary>
+public enum Transition { Fade, Wipe, Circle, Blinds, Dissolve, Pixels, Zoom, Random }
+
 public enum BlendMode { Normal, Add, Subtract, Multiply, Screen, Overlay, SoftLight, HardLight, Difference, Exclusion, Lighten, Darken, Dodge, Burn, Hue, Color, Luminosity }
 
 /// <summary>Drawn over what is below it in the scene, with its own effects; a filter shader (input "inputImage") gets that picture.</summary>
@@ -59,6 +62,16 @@ public sealed class Scene : Picture
     public SceneCanvas? Canvas { get; set; }
 
     [JsonIgnore] public string Title => Name.Trim() != "" ? Name.Trim() : Shader;
+
+    /// <summary>Small picture of the scene as it last played (Thumbs.Pack), for the lists; null = not played yet.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Thumb { get; set; }
+    /// <summary>Changes when Thumb does (0 = none): the web panel's image address.</summary>
+    [JsonIgnore] public int ThumbKey => Thumb == null ? 0 : ReferenceEquals(thumbOf, Thumb) ? thumbKey : (thumbKey = (thumbOf = Thumb).GetHashCode() | 1);
+    string? thumbOf;
+    int thumbKey;
+    /// <summary>Params and effects before the last Sorpresa (not saved).</summary>
+    [JsonIgnore] public (Dictionary<string, ParamState> Params, Dictionary<string, ParamState> Effects)? Undo { get; set; }
 
     // ponytail: motion thresholds guessed (mean color change per 1/4 s on a 32x18 thumbnail); retune with real shaders
     public const float SoftMotion = 0.03f, StrongMotion = 0.08f;
@@ -102,6 +115,12 @@ public sealed class Project
     public bool Shuffle { get; set; }
     public bool Crossfade { get; set; }
     public float CrossfadeSeconds { get; set; } = 2;
+    public Transition Transition { get; set; }
+    /// <summary>Length of the change in bars (4 beats) while the BPM is known; 0 = CrossfadeSeconds.</summary>
+    public float CrossfadeBars { get; set; }
+    public static readonly string[] TransitionNames = ["Fundido", "Barrido", "Círculo", "Persianas", "Disolver", "Píxeles", "Zoom", "Al azar"];
+    public static readonly float[] BarChoices = [0, 0.5f, 1, 2, 4];
+    public static readonly string[] BarNames = ["En segundos", "1/2 compás", "1 compás", "2 compases", "4 compases"];
     /// <summary>Only read from projects saved when effects were global; moved into the scenes by EnsureEffects.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public Dictionary<string, ParamState>? Effects { get; set; }
@@ -189,6 +208,8 @@ public sealed class Player
     public double SceneTime { get; private set; }
     public double PrevTime { get; private set; }
     public float Fade { get; private set; } = 1;   // 0 = only Previous visible, 1 = only Current
+    /// <summary>Shape of the change running now (Random already picked).</summary>
+    public Transition Shape { get; private set; }
     /// <summary>The Auto DJ is changing scenes with the music: the scenes' durations wait.</summary>
     public bool AutoDriving { get; set; }
 
@@ -203,7 +224,8 @@ public sealed class Player
         Fade = 1;
     }
 
-    public void Update(double dt)
+    /// <param name="bpm">the music's tempo (0 = not known): changes measured in bars follow it</param>
+    public void Update(double dt, float bpm = 0)
     {
         if (Current >= Count) Current = Count - 1;
         if (Current < 0 && Count > 0) Current = 0;
@@ -211,7 +233,8 @@ public sealed class Player
         PrevTime += dt;
         if (Previous >= 0)
         {
-            Fade = Project.CrossfadeSeconds > 0 ? Math.Min(1, Fade + (float)(dt / Project.CrossfadeSeconds)) : 1;
+            double secs = Project.CrossfadeBars > 0 && bpm > 0 ? Math.Min(Project.CrossfadeBars, 8) * 240 / bpm : Project.CrossfadeSeconds;
+            Fade = secs > 0 ? Math.Min(1, Fade + (float)(dt / secs)) : 1;
             if (Fade >= 1) Previous = -1;
         }
         if (!AutoDriving && Current >= 0 && Project.Scenes[Current].Duration is > 0 and var d && SceneTime >= d) Next();
@@ -222,7 +245,11 @@ public sealed class Player
     public void GoTo(int i)
     {
         if (i < 0 || i >= Count) return;
-        if (Project.Crossfade && Current >= 0 && i != Current) { Previous = Current; PrevTime = SceneTime; Fade = 0; }
+        if (Project.Crossfade && Current >= 0 && i != Current)
+        {
+            (Previous, PrevTime, Fade) = (Current, SceneTime, 0);
+            Shape = Project.Transition is >= Transition.Random or < 0 ? (Transition)rng.Next((int)Transition.Random) : Project.Transition;
+        }
         else Previous = -1;
         Current = i;
         SceneTime = 0;
