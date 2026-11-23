@@ -221,7 +221,7 @@ public sealed unsafe class Renderer : IDisposable
         DrawScene(player.Current >= 0 ? scenes[player.Current] : null, player.SceneTime, dt, ref sceneA, audio);
         bool fading = player.Previous >= 0;
         if (fading) DrawScene(scenes[player.Previous], player.PrevTime, dt, ref sceneB, audio);
-        DrawPost(player, audio, dt, fading ? 1 - player.Fade : 0, maxHz);
+        DrawPost(player, audio, dt, fading ? OldMix(player, audio.Bands, maxHz, Time) : 0, maxHz);
         MeasureMotion(player, dt);
         TakeThumb(player);
 
@@ -499,6 +499,19 @@ public sealed unsafe class Renderer : IDisposable
         }
     }
 
+    /// <summary>How much of the old scene shows during a change: 1 - Fade, or for "Strobe al ritmo" all of one scene or the other,
+    /// jumping on the beat with the new one a bigger part of each beat. Never more jumps a second than the flash limit (every 2, 4... beats).</summary>
+    // ponytail: the limit counts only this change, not a scene strobe running at the same time
+    public static float OldMix(Player pl, AudioBands b, float maxHz, double time)
+    {
+        if (pl.Shape != Transition.Strobe) return 1 - pl.Fade;
+        float bpm = b.Bpm > 0 ? b.Bpm : 120;
+        double beats = 1;
+        while (bpm / 60 / beats > maxHz) beats *= 2;
+        double x = (b.Bpm > 0 ? b.Beats : time * bpm / 60) / beats;
+        return x - Math.Floor(x) < pl.Fade ? 0 : 1;
+    }
+
     /// <summary>Effect value of the playing scene; during a crossfade it blends from the previous scene's value.</summary>
     float Fx(Player pl, AudioAnalyzer audio, string n)
     {
@@ -527,7 +540,7 @@ public sealed unsafe class Renderer : IDisposable
         Bind(1, mixB > 0 ? sceneB.Tex : sceneA.Tex, "sceneB");
         Bind(2, pong.Tex, "prevOut");
         gl.Uniform1(post.Loc(gl, "mixB"), mixB);
-        gl.Uniform1(post.Loc(gl, "trans"), (float)player.Shape);
+        gl.Uniform1(post.Loc(gl, "trans"), player.Shape == Transition.Strobe ? 0f : (float)player.Shape); // the strobe is a plain cut, timed here
         gl.Uniform1(post.Loc(gl, "layer"), 0f);
         gl.Uniform2(post.Loc(gl, "RENDERSIZE"), (float)w, (float)h);
         foreach (var d in EffectDefs.All)

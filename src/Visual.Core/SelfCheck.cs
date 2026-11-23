@@ -119,6 +119,16 @@ public static class SelfCheck
         tpl.Update(1);
         Near(tpl.Fade, 0.25f);
         Check(Project.TransitionNames.Length == Enum.GetValues<Transition>().Length && Project.BarNames.Length == Project.BarChoices.Length, "transiciones: un nombre por opción");
+        // "Strobe al ritmo": on each beat the new scene first, for Fade of the beat; at 2 jumps/s max, every other beat at 120
+        var sb = new AudioBands { Bpm = 120, Beats = 10.2 };
+        var spl = new Player();
+        spl.Start(new Project { Crossfade = true, Transition = Transition.Strobe, Scenes = [new Scene(), new Scene()] });
+        spl.GoTo(1);
+        spl.Update(1); // half of the 2 s change
+        Check(Renderer.OldMix(spl, sb, 3, 0) == 0, "strobe al ritmo: la nueva al empezar el tiempo");
+        sb.Beats = 10.7;
+        Check(Renderer.OldMix(spl, sb, 3, 0) == 1, "strobe al ritmo: la vieja al final del tiempo");
+        Check(Renderer.OldMix(spl, sb, 1, 0) == 0, "strobe al ritmo: con el límite salta cada 2 tiempos");
         ThumbSurpriseCheck();
 
         Check(BandOf(100) == 0, "100 Hz -> graves");

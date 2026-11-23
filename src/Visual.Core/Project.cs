@@ -24,7 +24,7 @@ public abstract class Picture
 }
 
 /// <summary>Shape of the change between scenes; Random picks one of the others each time.</summary>
-public enum Transition { Fade, Wipe, Circle, Blinds, Dissolve, Pixels, Zoom, Random }
+public enum Transition { Fade, Wipe, Circle, Blinds, Dissolve, Pixels, Zoom, Strobe, Random }
 
 public enum BlendMode { Normal, Add, Subtract, Multiply, Screen, Overlay, SoftLight, HardLight, Difference, Exclusion, Lighten, Darken, Dodge, Burn, Hue, Color, Luminosity }
 
@@ -118,7 +118,7 @@ public sealed class Project
     public Transition Transition { get; set; }
     /// <summary>Length of the change in bars (4 beats) while the BPM is known; 0 = CrossfadeSeconds.</summary>
     public float CrossfadeBars { get; set; }
-    public static readonly string[] TransitionNames = ["Fundido", "Barrido", "Círculo", "Persianas", "Disolver", "Píxeles", "Zoom", "Al azar"];
+    public static readonly string[] TransitionNames = ["Fundido", "Barrido", "Círculo", "Persianas", "Disolver", "Píxeles", "Zoom", "Strobe al ritmo", "Al azar"];
     public static readonly float[] BarChoices = [0, 0.5f, 1, 2, 4];
     public static readonly string[] BarNames = ["En segundos", "1/2 compás", "1 compás", "2 compases", "4 compases"];
     /// <summary>Only read from projects saved when effects were global; moved into the scenes by EnsureEffects.</summary>
