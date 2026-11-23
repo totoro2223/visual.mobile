@@ -191,7 +191,7 @@ public sealed class IsfShader
         foreach (var b in Buffers) sb.Append(Image(b));
         sb.Append(extra);
         sb.Append("#line 1\n");
-        var code = ExpandMacros(VersionLine.Replace(body, ""));
+        var code = ExpandMacros(VersionLine.Replace(ExpandDefines ? ExpandFnDefines(body) : body, ""));
         // GLSL ES 1.00 only takes constant global initializers; desktop GLSL 1.20 accepts anything
         sb.Append(header.Contains("precision") ? HoistGlobals(code, Inputs.Select(i => i.Name).Concat(Buffers)) : code);
         // GLSL is ASCII only: accents in comments/description make drivers fail ("pre-mature EOF")
@@ -259,6 +259,60 @@ public sealed class IsfShader
     static string Image(string n) =>
         $"uniform sampler2D {n};\nuniform vec2 _{n}_imgSize;\nuniform vec4 _{n}_imgRect;\nuniform bool _{n}_flip;\n"
         + $"vec4 _{n}_px(vec2 p) {{ return texture2D({n}, _{n}_flip ? vec2(p.x, 1.0 - p.y) : p); }}\n";
+
+    /// <summary>Set by the app: old drivers (Intel HD) choke on function-like #defines, so they are expanded here.</summary>
+    public static bool ExpandDefines;
+
+    static readonly Regex FnDefine = new(@"^[ \t]*#[ \t]*define[ \t]+(\w+)\(([^)]*)\)((?:[^\n]*\\\r?\n)*[^\n]*)", RegexOptions.Multiline);
+
+    /// <summary>
+    /// `#define S(a, b) ...` lines become blank (line numbers kept) and every `S(x, y)` gets the body with the arguments in,
+    /// like the C preprocessor: a name without '(' after it is left alone, macros inside macros expand too.
+    /// ponytail: #if / #ifdef around a #define is not evaluated, no # / ## operators; upgrade if a shader needs them.
+    /// </summary>
+    public static string ExpandFnDefines(string src)
+    {
+        var defs = new Dictionary<string, (string[] Params, string Body)>();
+        src = FnDefine.Replace(src, m =>
+        {
+            var body = Regex.Replace(m.Groups[3].Value, @"\\\r?\n", " ");
+            body = Regex.Replace(body, @"/\*.*?\*/|//.*", " ").Trim();
+            defs[m.Groups[1].Value] = (m.Groups[2].Value.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries), body);
+            return new string('\n', m.Value.Count(c => c == '\n'));
+        });
+        return defs.Count == 0 ? src : ExpandCalls(src, defs, []);
+    }
+
+    static string ExpandCalls(string s, Dictionary<string, (string[] Params, string Body)> defs, HashSet<string> active)
+    {
+        var sb = new StringBuilder();
+        int pos = 0;
+        foreach (Match m in Regex.Matches(s, @"(?<![\w.])([A-Za-z_]\w*)\s*\("))
+        {
+            var name = m.Groups[1].Value;
+            if (m.Index < pos || active.Contains(name) || !defs.TryGetValue(name, out var d)) continue;
+            var args = new List<string>();
+            int i = m.Index + m.Length, start = i, depth = 1;
+            for (; i < s.Length && depth > 0; i++)
+            {
+                char c = s[i];
+                if (c == '(') depth++;
+                else if (c == ')' && --depth == 0) args.Add(s[start..i]);
+                else if (c == ',' && depth == 1) { args.Add(s[start..i]); start = i + 1; }
+            }
+            if (depth != 0) continue; // unbalanced (a comment?): leave it to the driver
+            if (d.Params.Length == 0 && args is [var only] && only.Trim() == "") args.Clear();
+            if (args.Count != d.Params.Length) continue;
+            var a = args.Select(x => ExpandCalls(x, defs, active).Trim()).ToList();
+            var body = Regex.Replace(d.Body, @"(?<![\w.])[A-Za-z_]\w*", w => Array.IndexOf(d.Params, w.Value) is var k and >= 0 ? a[k] : w.Value);
+            active.Add(name);
+            body = ExpandCalls(body, defs, active);
+            active.Remove(name);
+            sb.Append(s, pos, m.Index - pos).Append(body);
+            pos = i;
+        }
+        return sb.Append(s, pos, s.Length - pos).ToString();
+    }
 
     public static string ExpandMacros(string src)
     {

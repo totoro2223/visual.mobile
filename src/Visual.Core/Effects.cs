@@ -196,7 +196,7 @@ public static class EffectDefs
             vec2 n = floor(vec2(maskRepX, maskRepY) + 0.5), sep = vec2(maskSepX, maskSepY), mc = vec2(maskX, maskY), mw = vec2(maskW, maskH) / n;
             vec2 pitch = max(mix(mw, 1.0 / n, sep), 0.0001);
             vec2 u = (isf_FragNormCoord - mix(mc, (mc + (n - 1.0) * 0.5) / n, sep)) / pitch + (n - 1.0) * 0.5;
-            vec2 d = abs((u - clamp(floor(u + 0.5), 0.0, n - 1.0)) * pitch) - 0.5 * mw;
+            vec2 d = abs((u - clamp(floor(u + 0.5), vec2(0.0), n - 1.0)) * pitch) - 0.5 * mw;
             vec2 m = clamp(-d / max(maskSoft, 0.0001), 0.0, 1.0);
             m = m * m * (3.0 - 2.0 * m);
             c = clamp(mix(c, s, strobe), 0.0, 1.0) * onPlane;

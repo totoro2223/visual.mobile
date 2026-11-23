@@ -63,9 +63,14 @@ h3{margin:18px 0 6px;color:var(--mut);font-size:13px;text-transform:uppercase;le
 #err{color:#f77;padding:0 16px;margin:10px auto;max-width:640px}
 #err:empty{display:none}
 .dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:#5e8;margin-right:6px}
-.off>div>*{opacity:.45}
-.off>div>.row:first-child{opacity:1}
-.off>div>.row:first-child>:not(label){opacity:.45}
+.lock>div>*{opacity:.45}
+.lock>div>.row:first-child{opacity:1}
+.lock>div>.row:first-child>:not(label){opacity:.45}
+/* unticked effect: nothing moves until its box is ticked */
+.lock>div *{pointer-events:none}
+.lock input.fxon{pointer-events:auto}
+.fx.act{border-left:3px solid var(--acc);padding-left:8px;margin-left:-11px}
+.fx.act>div>.row:first-child>label{color:var(--acc)}
 .prow{margin:12px 0 0}
 .prow>label{flex:1 1 auto}
 .prow+.row{margin-top:2px}
@@ -212,7 +217,8 @@ function slider(label, v, min, max, on, log) {
   return row(label, r, out);
 }
 function selEl(opts, idx, on) {
-  const s = el('select', { onchange: () => on(s.selectedIndex) }, ...opts.map(o => el('option', { textContent: o })));
+  // blur: a focused select holds back the redraw (see poll), so what the choice shows (a URL field...) would wait for a tap elsewhere
+  const s = el('select', { onchange: () => { s.blur(); on(s.selectedIndex); } }, ...opts.map(o => el('option', { textContent: o })));
   s.selectedIndex = idx;
   return s;
 }
@@ -237,9 +243,9 @@ function uploadMedia(f) {
     const x = new XMLHttpRequest();
     x.open('POST', '/media?k=' + encodeURIComponent(K) + '&name=' + encodeURIComponent(f.name));
     x.upload.onprogress = e => { if (e.lengthComputable) note(`Subiendo ${f.name}: ${Math.round(e.loaded / e.total * 100)} %`); };
-    x.onload = () => { note(x.status === 200 ? 'Subido: ' + f.name : `No se pudo subir ${f.name}: ${x.responseText}`); done(); };
+    x.onload = () => { note(x.status === 200 ? 'Subido: ' + f.name : `No se pudo subir ${f.name}: ${x.responseText}`); done(x.status === 200); };
     // a refused file (type, size, no space) is answered before it is sent, which the browser reports as an error
-    x.onerror = () => { note(`No se pudo subir ${f.name}: se cortó la conexión, el tipo de archivo no se admite o no hay espacio en el equipo.`); done(); };
+    x.onerror = () => { note(`No se pudo subir ${f.name}: se cortó la conexión, el tipo de archivo no se admite o no hay espacio en el equipo.`); done(false); };
     note('Subiendo ' + f.name + '…');
     x.send(f);
   });
@@ -557,9 +563,12 @@ function inputsEd(inputs, params, media, base, kp, filter) {
         const md = media && media[inp.Name], src = md ? md.Src : '', speed = md ? md.Speed : 1;
         const isUrl = /^https?:\/\//i.test(src), files = S.MediaFiles;
         const set = v => post({ op: 'media', ...base, name: inp.Name, value: v });
-        const opts = [filter && inp.Name === 'inputImage' ? '(lo que está debajo)' : '(nada: negro)', ...files, 'URL (http / https)…'];
-        out.push(sel(inp.Label, opts, !src ? 0 : isUrl ? opts.length - 1 : files.indexOf(src) + 1,
-          j => set(j === 0 ? null : { Src: j === opts.length - 1 ? 'https://' : files[j - 1], Speed: speed })));
+        const opts = [filter && inp.Name === 'inputImage' ? '(lo que está debajo)' : '(nada: negro)', ...files, 'Subir archivo…', 'URL (http / https)…'];
+        const up = el('input', { type: 'file', accept: 'video/*,image/*', style: 'display:none', // uploaded, then chosen here
+          onchange: async () => { const f = up.files[0]; if (f && await uploadMedia(f)) set({ Src: f.name, Speed: speed }); } });
+        out.push(up, sel(inp.Label, opts, !src ? 0 : isUrl ? opts.length - 1 : files.indexOf(src) + 1,
+          j => j === opts.length - 2 ? up.click() : set(j === 0 ? null : { Src: j === opts.length - 1 ? 'https://' : files[j - 1], Speed: speed })));
+        if (!files.length && !src) out.push(hint('No hay videos en este equipo: subí uno o pegá una URL.'));
         if (src && !isUrl && !files.includes(src)) out.push(el('p', { textContent: `No está en este equipo: ${src}. Subilo en Archivos.`, style: 'color:#f77' }));
         if (isUrl) out.push(row('URL', txt(src === 'https://' ? '' : src, v => set({ Src: v.trim(), Speed: speed }), 'https://…/video.mp4')),
           hint('Dirección directa a un .mp4 / .webm (o .m3u8 en el TV). YouTube y otras páginas no funcionan.'));
@@ -577,6 +586,8 @@ function inputsEd(inputs, params, media, base, kp, filter) {
   return out;
 }
 
+// effects ticked while still at their default (not in use yet): only this page remembers them
+const armed = new Set();
 // in use (with their siblings: strobe, mask, monocolor) apart from the rest, like the PC
 function fxEd(effects, base, kp) {
   const defs = S.EffectDefs.filter(d => effects && effects[d.Name]);
@@ -589,15 +600,21 @@ function fxEd(effects, base, kp) {
     return Math.abs(Math.min(hi, Math.max(lo, ps.Value[0])) - d.Default) > 1e-4;
   };
   const used = new Set(defs.filter(inUse).map(d => grp(d.Name)));
-  const fx = d => { // on/off switch + value + modifier; off keeps the settings
-    const ps = effects[d.Name];
+  const fx = d => { // ticked = in use (or just ticked to start moving it); unticked = locked; unticking keeps the settings (Off)
+    const ps = effects[d.Name], key = JSON.stringify(base) + d.Name, act = inUse(d);
     const mk = () => ({ op: 'effect', ...base, name: d.Name, state: ps });
-    const box = el('div', { className: 'fx' + (ps.Off ? ' off' : '') });
-    const cb = el('input', { type: 'checkbox', checked: !ps.Off,
-      onchange: () => { ps.Off = !cb.checked; box.classList.toggle('off', ps.Off); edit(kp + 'e:' + d.Name, mk()); } });
+    const on = act || armed.has(key);
+    const box = el('div', { className: 'fx' + (on ? '' : ' lock') + (act ? ' act' : '') });
+    const cb = el('input', { type: 'checkbox', className: 'fxon', checked: on, title: on ? 'Desactivar sin perder la configuración' : 'Activar para poder moverlo',
+      onchange: () => {
+        const was = inUse(d);
+        if (cb.checked) { armed.add(key); ps.Off = false; } else { armed.delete(key); if (was) ps.Off = true; }
+        box.classList.toggle('lock', !cb.checked); box.classList.toggle('act', inUse(d));
+        edit(kp + 'e:' + d.Name, mk());
+      } });
     box.append(...paramEd(d.Label, ps, d.Min, d.Max, d.Labels, kp + 'e:' + d.Name, mk, {
       cap: d.Name === 'strobeRate' ? S.MaxHz : undefined,
-      decorate: lbl => { if (inUse(d)) lbl.prepend(el('i', { class: 'dot' })); lbl.prepend(cb); },
+      decorate: lbl => lbl.prepend(cb),
     }));
     return box;
   };
@@ -914,14 +931,18 @@ function pvLoop(now) {
 if (pvThumbs) requestAnimationFrame(pvLoop);
 
 function renderProj() {
-  const d = S.Device; // the TV / Android app sends all of it, the PC only the resolution
+  const d = S.Device; // the TV / Android app sends all of it, the PC only the resolution and the macro option
   if (d) {
     card('dev', 'Este dispositivo', 'c-dev');
     const SCALES = [1, 0.75, 0.5, 0.35];
     if (d.Sources) { const src = d.Sources.map(s => s.Id); add(sel('Fuente de sonido', d.Sources.map(s => s.Label), src.indexOf(d.Source), j => post({ op: 'device', source: src[j] }))); }
     add(sel('Resolución interna', ['100 %', '75 %', '50 %', '35 %'], SCALES.reduce((b, s, k) => Math.abs(s - d.Scale) < Math.abs(SCALES[b] - d.Scale) ? k : b, 0),
       j => post({ op: 'device', scale: SCALES[j] })));
-    if (!d.Sources) { add(el('p', { textContent: 'Si va lento, bajá la resolución interna (del visor y de la ventana de salida).' })); }
+    if (!d.Sources) {
+      add(el('p', { textContent: 'Si va lento, bajá la resolución interna (del visor y de la ventana de salida).' }));
+      if ('ExpandDefines' in d) add(chk('Compatibilidad: expandir macros de los shaders (drivers viejos)', d.ExpandDefines, b => post({ op: 'device', expand: b })),
+        hint('Para placas que fallan o se cierran con #define que llevan parámetros (Intel HD viejas). No cambia los archivos.'));
+    }
     else {
     add(sel('Cuadros por segundo', ['60', '30'], d.Fps >= 60 ? 0 : 1, j => post({ op: 'device', fps: j ? 30 : 60 })),
         el('p', { textContent: 'Si va lento o se traba, bajá la resolución interna o pasá a 30 cuadros. Los equipos USB aparecen al conectarlos.' }));

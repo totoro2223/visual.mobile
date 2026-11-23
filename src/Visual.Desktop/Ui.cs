@@ -695,17 +695,24 @@ sealed partial class App
         if (open) ImGui.Dummy(new Vector2(0, 6)); // room below the frame
     }
 
+    // effects ticked while still at their default (not in use yet)
+    readonly HashSet<ParamState> armed = [];
+
     bool EffectRowBody(EffectDef d, ParamState ps)
     {
-        bool en = !ps.Off;
-        if (ImGui.Checkbox($"##on{d.Name}", ref en)) ps.Off = !en; // off keeps the settings
-        if (ImGui.IsItemHovered()) ImGui.SetTooltip(en ? "Desactivar sin perder la configuración" : "Activar");
+        // ticked = in use (or just ticked to start moving it); unticked = locked; unticking keeps the settings (Off)
+        bool active = EffectDefs.IsActive(d, ps), en = active || armed.Contains(ps);
+        if (ImGui.Checkbox($"##on{d.Name}", ref en))
+        {
+            if (en) { armed.Add(ps); ps.Off = false; }
+            else { armed.Remove(ps); if (active) ps.Off = true; }
+        }
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip(en ? "Desactivar sin perder la configuración" : "Activar para poder moverlo");
         ImGui.SameLine();
         ActiveDot(EffectDefs.IsActive(d, ps));
-        bool dim = ps.Off; // still editable, just dimmed
-        if (dim) ImGui.PushStyleVar(ImGuiStyleVar.Alpha, 0.45f);
+        ImGui.BeginDisabled(!en);
         bool open = ParamEditor(d.Label, ps, d.Min, d.Max, d.Labels, renderer.Time, boldName: true);
-        if (dim) ImGui.PopStyleVar();
+        ImGui.EndDisabled();
         if (d.Name == "strobeRate" && !settings.AllowFastStrobe)
             ImGui.TextDisabled("Limitado a 3 Hz (se cambia en Ajustes)");
         return open;
@@ -1011,6 +1018,13 @@ sealed partial class App
         ImGui.SameLine();
         if (ImGui.Button("Elegir...##media")) PickFolder(settings.MediaFolder, "Carpeta con videos e imágenes", SetMediaFolder);
         if (ImGui.Button("Recargar shaders y videos")) ReloadShaders();
+        bool exp = settings.ExpandDefines;
+        if (ImGui.Checkbox("Compatibilidad: expandir macros de los shaders (drivers viejos)", ref exp))
+        {
+            settings.ExpandDefines = IsfShader.ExpandDefines = exp;
+            ReloadShaders();
+        }
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Para placas que fallan o se cierran con #define que llevan parámetros (Intel HD viejas).\nNo cambia los archivos.");
     }
 
     static void PickFolder(string current, string title, Action<string> set)

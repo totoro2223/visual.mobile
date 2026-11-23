@@ -8,6 +8,9 @@ public static class SelfCheck
         Eq(IsfShader.ExpandMacros("IMG_PIXEL(img, vec2(f(1,2), 3.0)) + IMG_THIS_PIXEL(a)"),
             "_img_px((vec2(f(1,2), 3.0)) / _img_imgSize) + _a_px(isf_FragNormCoord)");
         Eq(IsfShader.ExpandMacros("IMG_NORM_PIXEL(a, IMG_SIZE(b))"), "_a_px(_b_imgSize)");
+        // function-like #defines (old Intel drivers): a name without '(' stays, macros in macros expand, continued lines, lines kept
+        Eq(IsfShader.ExpandFnDefines("#define H(a) (a+1.0) // c\n#define S(x, y) H(x)*\\\n y\nfloat f(vec3 H, float b) { return S(b, 2.0) + H.x + p.S(1); }\n"),
+            "\n\n\nfloat f(vec3 H, float b) { return (b+1.0)*  2.0 + H.x + p.S(1); }\n");
 
         var s = IsfShader.Parse("""
             /*{ "INPUTS": [

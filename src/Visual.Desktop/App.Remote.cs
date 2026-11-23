@@ -67,8 +67,14 @@ sealed partial class App
                     case "new": NewProject(); break;
                     case "duplicate": DuplicateProject(); break;
                     case "import": ImportProject(c["text"]!.GetValue<string>()); break;
-                    case "device": // the PC only takes the resolution from the phone
+                    case "device": // the PC only takes the resolution and the macro option from the phone
                         if (c["scale"]?.GetValue<float>() is { } sc && float.IsFinite(sc)) { settings.Scale = Math.Clamp(sc, 0.25f, 1f); settings.Save(); }
+                        if (c["expand"]?.GetValue<bool>() is { } ex && ex != settings.ExpandDefines)
+                        {
+                            settings.ExpandDefines = IsfShader.ExpandDefines = ex;
+                            settings.Save();
+                            ReloadShaders();
+                        }
                         break;
                 }
             }
@@ -81,7 +87,7 @@ sealed partial class App
         var scenes = project.Scenes;
         var isf = player.Current >= 0 && player.Current < scenes.Count ? renderer.Get(scenes[player.Current].Shader).Isf : null;
         remote.State = Remote.State(player, isf, loadedName, projectNames, shaderFiles, mediaFiles, analyzer,
-            settings.AllowFastStrobe ? 20 : EffectDefs.SafeStrobeHz, renderer.StrobeActive, new { settings.Scale }, renderer.AutoDj, f => renderer.Get(f).Isf, renderer.AutoStrobe);
+            settings.AllowFastStrobe ? 20 : EffectDefs.SafeStrobeHz, renderer.StrobeActive, new { settings.Scale, settings.ExpandDefines }, renderer.AutoDj, f => renderer.Get(f).Isf, renderer.AutoStrobe);
     }
 
     void RemoteSettings()

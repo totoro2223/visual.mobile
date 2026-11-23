@@ -43,6 +43,7 @@ sealed partial class App : IDisposable
                 if (File.Exists(boldFile)) bold = ImGui.GetIO().Fonts.AddFontFromFileTTF(boldFile, 18); // effect names
             })
             : new ImGuiController(gl, window, input);
+        IsfShader.ExpandDefines = settings.ExpandDefines;
         renderer = new Renderer(gl, Renderer.DesktopHeader) { ShaderFolder = settings.ShaderFolder };
         renderer.OpenMedia = src => DesktopMedia.Open(gl, settings.MediaFolder, src);
         capture = new AudioCapture(analyzer);

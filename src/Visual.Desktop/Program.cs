@@ -58,6 +58,7 @@ sealed class Settings
     public float[] BandSense { get; set; } = [1, 1, 1, 1];
     public float MelodySmooth { get; set; } = 0.8f;
     public bool AllowFastStrobe { get; set; }
+    public bool ExpandDefines { get; set; } // old drivers: the app expands function-like #defines itself
     public string? LastProject { get; set; }
     // viewer rectangle inside the window, in pixels from the top-left; per machine because it depends on the screen
     public bool FillWindow { get; set; } = true;
