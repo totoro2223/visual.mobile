@@ -23,6 +23,8 @@ public static class SelfCheck
         Check(IsfShader.Parse("/*{\"DESCRIPTION\":\"maquínico\"}*/ void main(){} // ñ").BuildFragment("").All(ch => ch < 128), "GLSL sin acentos");
         Check(IsfShader.Parse("// credits\n/* by me */\n/*{\"INPUTS\":[{\"NAME\":\"x\",\"TYPE\":\"float\"}]}*/ void main(){}").Inputs.Count == 1, "ISF: encabezado después de comentarios");
         var mp = IsfShader.Parse("""/*{"PERSISTENT_BUFFERS":["last"],"PASSES":[{"TARGET":"a"},{"TARGET":"x;y"},{"TARGET":"last"},{}]}*/ void main(){}""");
+        var hg = IsfShader.Parse("float t = TIME * 2.0;\nconst float k = 3.0;\nfloat u = t + k;\nvoid main(){ gl_FragColor = vec4(u); }").BuildFragment(Renderer.EsHeader);
+        Check(hg.Contains("float t;") && hg.Contains("const float k = 3.0;") && hg.Contains("main(){t = TIME * 2.0; u = t + k; "), "ISF ES: iniciales globales no constantes pasan a main");
         Check(mp.Passes.SequenceEqual(["a", "", "last", ""]) && mp.Buffers.SequenceEqual(["a", "last"])
             && mp.BuildFragment("").Contains("uniform sampler2D last;") && mp.BuildVertex("") == null, "ISF: pasadas y buffers");
         mp.VertexSource = "varying vec2 c; void main(){ vv_vertShaderInit(); c = vv_FragNormCoord * RENDERSIZE; }";
@@ -293,6 +295,16 @@ public static class SelfCheck
         Check(!mm.Locked, "remoto: música en automático");
         Remote.Apply(Cmd("""{"op":"autodj","value":{"Enabled":false,"Bars":500,"Drops":false}}"""), pl, []);
         Check(pl.Project.AutoDj is { Enabled: false, Bars: 64, Drops: false }, "remoto: auto dj");
+        Remote.Apply(Cmd("""{"op":"autodj","value":{"Enabled":true,"Bars":8,"RandomBars":true,"BarsMax":4,"Sensitivity":9}}"""), pl, []);
+        Check(pl.Project.AutoDj is { RandomBars: true, Bars: 8, BarsMax: 8, Sensitivity: 1 }, "remoto: auto dj al azar y sensibilidad");
+        Remote.Apply(Cmd("""{"op":"quality","scene":0,"value":0.1}"""), pl, []);
+        Check(pl.Project.Scenes[0].Quality == 0.25f, "remoto: calidad propia de la escena (mínimo 25 %)");
+        Remote.Apply(Cmd("""{"op":"quality","scene":0,"value":0}"""), pl, []);
+        Check(pl.Project.Scenes[0].Quality == 0, "remoto: calidad vuelve a la global");
+        var rdj = new AutoDjRunner(new Random(3));
+        pl.Project.AutoDj.BarsMax = 32;
+        Check(Enumerable.Range(0, 50).All(_ => { rdj.Update(pl.Project.AutoDj, pl, new MusicMeter(), 0.01f); return rdj.Target(pl.Project.AutoDj) is >= 8 and <= 32; }),
+            "auto dj: duración al azar dentro del rango");
         Remote.Apply(Cmd("""{"op":"intensity","scene":0,"value":3}"""), pl, []);
         Check(pl.Project.Scenes[0].Intensity == 3, "remoto: intensidad de la escena");
         pl.Project.EnsureEffects();

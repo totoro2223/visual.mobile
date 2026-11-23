@@ -51,6 +51,9 @@ public sealed class Scene : Picture
     public float Motion { get; set; } = -1;
     /// <summary>Drawn over the base shader in order (first = right above it), before the scene's effects.</summary>
     public List<Layer> Layers { get; set; } = [];
+    /// <summary>Own internal resolution for this scene (0.25..1); 0 = the device's (global) one.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public float Quality { get; set; }
     /// <summary>Own canvas for this scene; null = the device's (global) one.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public SceneCanvas? Canvas { get; set; }

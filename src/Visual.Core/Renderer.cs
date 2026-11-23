@@ -205,7 +205,8 @@ public sealed unsafe class Renderer : IDisposable
         var g = global is { } gr ? (gr.X / (float)width, gr.Y / (float)height, gr.W / (float)width, gr.H / (float)height) : (0f, 0f, 1f, 1f);
         var (cur, f) = Place(player, g, renderW > 0 ? renderW : width, renderH > 0 ? renderH : height);
         // sized for the new scene's canvas; during a fade the picture stretches a little while the rectangle slides
-        var (iw, ih) = InternalSize(renderW > 0 ? renderW : width, renderH > 0 ? renderH : height, Scale);
+        float q = player.Current >= 0 ? player.Project.Scenes[player.Current].Quality : 0; // the scene's own quality, if any
+        var (iw, ih) = InternalSize(renderW > 0 ? renderW : width, renderH > 0 ? renderH : height, q > 0 ? q : Scale);
         EnsureSize(Math.Max(1, (int)(iw * cur.W)), Math.Max(1, (int)(ih * cur.H)));
         gl.BindVertexArray(vao);
         gl.Viewport(0, 0, (uint)w, (uint)h);

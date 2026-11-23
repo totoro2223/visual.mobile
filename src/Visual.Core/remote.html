@@ -138,7 +138,7 @@ async function poll() {
     S = await r.json();
     document.getElementById('err').textContent = '';
     const s = JSON.stringify([tab, S.Project, S.Loaded, S.Projects, S.Shaders, S.Current, S.Scenes, S.Shuffle, S.Crossfade,
-      S.CrossfadeSeconds, S.Inputs, S.Params, S.Effects, S.AutoStrobe, S.AutoDj, S.MaxHz, S.Device, S.Canvas, S.Name, S.Media, S.MediaFiles, S.Layers]);
+      S.CrossfadeSeconds, S.Inputs, S.Params, S.Effects, S.AutoStrobe, S.AutoDj, S.MaxHz, S.Device, S.Canvas, S.Quality, S.Name, S.Media, S.MediaFiles, S.Layers]);
     // don't rebuild under the user's finger: wait until they stop touching / typing
     const typing = document.activeElement && document.activeElement.matches('select,input[type=number],input[type=text]');
     if (s !== sig && !busy && !typing && Date.now() - lastEdit > 1500) { sig = s; render(); }
@@ -391,10 +391,14 @@ function renderLive() {
   const dj = S.AutoDj, goDj = () => edit('dj', { op: 'autodj', value: dj }), BARS = [4, 8, 16, 32];
   card('autodj', 'Auto DJ', 'c-param', true, dj.Enabled ? 'prendido' : 'apagado');
   add(chk('Cambiar escenas con la música', dj.Enabled, b => { dj.Enabled = b; goDj(); }),
-    sel('Cambiar cada', BARS.map(n => n + ' compases'), Math.max(0, BARS.indexOf(dj.Bars)), j => { dj.Bars = BARS[j]; goDj(); }),
-    chk('Reaccionar a drops y cortes', dj.Drops, b => { dj.Drops = b; goDj(); }),
+    chk('Duración al azar (entre dos valores)', dj.RandomBars, b => { dj.RandomBars = b; post({ op: 'autodj', value: dj }); }),
+    sel(dj.RandomBars ? 'Mínimo' : 'Cambiar cada', BARS.map(n => n + ' compases'), Math.max(0, BARS.indexOf(dj.Bars)),
+      j => { dj.Bars = BARS[j]; if (dj.BarsMax < dj.Bars) dj.BarsMax = dj.Bars; goDj(); }),
+    ...(dj.RandomBars ? [sel('Máximo', BARS.map(n => n + ' compases'), Math.max(0, BARS.indexOf(dj.BarsMax)), j => { dj.BarsMax = Math.max(BARS[j], dj.Bars); goDj(); })] : []),
+    chk('Cambiar al cambiar la intensidad (y en drops)', dj.Drops, b => { dj.Drops = b; goDj(); }),
+    slider('Sensibilidad', dj.Sensitivity, 0, 1, x => { dj.Sensitivity = x; goDj(); }),
     el('div', { id: 'djst' }, el('b'), el('small')),
-    hint('Cambia en el 1 del compás, a una escena de intensidad parecida a la energía. En un drop corta enseguida a una fuerte. La intensidad de cada escena se elige en la pestaña Escena (Auto = la mide mientras suena).'));
+    hint('Cambia en el 1 del compás, a una escena de intensidad parecida a la energía. En un drop corta enseguida a una fuerte. Sensibilidad: más alta = reacciona a cambios más chicos de energía. La intensidad de cada escena se elige en la pestaña Escena (Auto = la mide mientras suena).'));
   card('list', 'Escenas', 'c-scene', true, S.Scenes.length + '');
   // same setting as in Proyecto; the Control card's button says "al azar" after the rebuild
   add(chk('Orden aleatorio', S.Shuffle, b => {
@@ -454,9 +458,9 @@ function live() { // cheap updates every poll, no rebuild
   const dj = S.Dj && S.Dj.Active; // the Auto DJ decides: bars instead of seconds
   if (pg && s) {
     const d = s.Duration, t = S.SceneTime;
-    pg.firstChild.textContent = dj ? `Auto DJ · compás ${S.Dj.Bar + 1} / ${S.AutoDj.Bars}` : d > 0 ? `${t.toFixed(0)} / ${+d.toFixed(1)} s` : `${t.toFixed(0)} s`;
+    pg.firstChild.textContent = dj ? `Auto DJ · compás ${S.Dj.Bar + 1} / ${S.Dj.Target}` : d > 0 ? `${t.toFixed(0)} / ${+d.toFixed(1)} s` : `${t.toFixed(0)} s`;
     pg.lastChild.style.display = dj || d > 0 ? '' : 'none';
-    pg.lastChild.firstChild.style.width = (dj ? Math.min(100, S.Dj.Bar / S.AutoDj.Bars * 100) : d > 0 ? Math.min(100, t / d * 100) : 0) + '%';
+    pg.lastChild.firstChild.style.width = (dj ? Math.min(100, S.Dj.Bar / S.Dj.Target * 100) : d > 0 ? Math.min(100, t / d * 100) : 0) + '%';
   }
   const ds = document.getElementById('djst');
   if (ds && S.Dj) {
@@ -496,7 +500,18 @@ function renderScene() {
       btn('Quitar', () => { if (confirm('¿Quitar esta escena del proyecto?')) post({ op: 'remove', i }); }, 'danger')));
     const cv = S.Canvas, setCv = v => post({ op: 'canvas', scene: i, value: v });
     card('canvas', 'Lienzo', 'c-scene', !!cv, cv ? 'propio de esta escena' : 'usa el global');
-    add(chk('Lienzo propio (reemplaza el global)', !!cv, b => setCv(b ? { Mode: 'full', X: 0, Y: 0, W: 1280, H: 720 } : null)));
+    // starts as a copy of the global canvas, as pixels so X/Y/W/H show up already filled in (same rectangle as Renderer.Fit)
+    const own = () => {
+      const g = S.Device; if (!g) return { Mode: 'full', X: 0, Y: 0, W: 1280, H: 720 };
+      const [a, b] = g.Canvas.split(':').map(Number), sw = g.ScreenW, sh = g.ScreenH;
+      if (g.Canvas === 'px') return { Mode: 'px', X: g.ViewX, Y: g.ViewY, W: g.ViewW, H: g.ViewH };
+      const k = a > 0 && b > 0 ? Math.min(sw / a, sh / b) : 0, w = k ? Math.round(a * k) : sw, h = k ? Math.round(b * k) : sh;
+      return { Mode: 'px', X: Math.round((sw - w) / 2), Y: Math.round((sh - h) / 2), W: w, H: h };
+    };
+    const QS = [0, 1, 0.75, 0.5, 0.35];
+    add(sel('Calidad de esta escena', ['Global', '100 %', '75 %', '50 %', '35 %'], Math.max(0, QS.findIndex(q => Math.abs(q - S.Quality) < 0.01)),
+      j => post({ op: 'quality', scene: i, value: QS[j] })));
+    add(chk('Lienzo propio (reemplaza el global)', !!cv, b => setCv(b ? own() : null)));
     if (cv) {
       const CANVAS = ['full', '16:9', '4:3', '1:1', 'px'];
       add(sel('Lienzo de la escena', ['Pantalla completa', '16:9 centrado', '4:3 centrado', 'Cuadrado 1:1', 'Personalizado (píxeles)'],

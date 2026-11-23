@@ -191,10 +191,68 @@ public sealed class IsfShader
         foreach (var b in Buffers) sb.Append(Image(b));
         sb.Append(extra);
         sb.Append("#line 1\n");
-        sb.Append(ExpandMacros(VersionLine.Replace(body, "")));
+        var code = ExpandMacros(VersionLine.Replace(body, ""));
+        // GLSL ES 1.00 only takes constant global initializers; desktop GLSL 1.20 accepts anything
+        sb.Append(header.Contains("precision") ? HoistGlobals(code, Inputs.Select(i => i.Name).Concat(Buffers)) : code);
         // GLSL is ASCII only: accents in comments/description make drivers fail ("pre-mature EOF")
         for (int k = 0; k < sb.Length; k++) if (sb[k] > 127) sb[k] = ' ';
         return sb.ToString();
+    }
+
+    static readonly string[] Builtins = ["TIME", "TIMEDELTA", "RENDERSIZE", "FRAMEINDEX", "PASSINDEX", "DATE", "isf_FragNormCoord", "vv_FragNormCoord", "gl_FragCoord"];
+    static readonly Regex GlobalInit = new(@"^\s*(?:const\s+)?((?:i|b)?vec[234]|mat[234]|float|int|bool)\s+(\w+)\s*=\s*(.+)$", RegexOptions.Singleline);
+    static readonly Regex MainFn = new(@"void\s+main\s*\(\s*(?:void)?\s*\)\s*\{");
+
+    /// <summary>
+    /// `float t = TIME * 2.0;` outside any function becomes `float t;` plus `t = TIME * 2.0;` at the start of main().
+    /// Names set this way count as non-constant for the declarations after them.
+    /// shortcut: one declarator per statement (`float a = 1., b = TIME;` stays as is), comments are dropped; upgrade if a shader needs it.
+    /// </summary>
+    static string HoistGlobals(string src, IEnumerable<string> inputs)
+    {
+        src = Regex.Replace(src, @"//[^\n]*|/\*.*?\*/", m => new string('\n', m.Value.Count(c => c == '\n')), RegexOptions.Singleline);
+        var tainted = new HashSet<string>(Builtins.Concat(inputs));
+        var sb = new StringBuilder();
+        var init = new StringBuilder();
+        int depth = 0, paren = 0, st = 0, copied = 0;
+        for (int i = 0; i < src.Length; i++)
+        {
+            char c = src[i];
+            if (c == '#' && depth == 0 && src.AsSpan(st, i - st).IsWhiteSpace())
+            {
+                while (i < src.Length && src[i] != '\n') i++; // ponytail: no backslash-continued #define spanning lines
+                st = i;
+            }
+            else if (c == '(') paren++;
+            else if (c == ')') paren--;
+            else if (c == '{') depth++;
+            else if (c == '}' && --depth == 0) st = i + 1;
+            else if (c == ';' && depth == 0 && paren == 0)
+            {
+                var m = GlobalInit.Match(src[st..i]);
+                if (m.Success && !HasTopComma(m.Groups[3].Value)
+                    && Regex.Matches(m.Groups[3].Value, @"\w+").Any(w => tainted.Contains(w.Value)))
+                {
+                    tainted.Add(m.Groups[2].Value);
+                    sb.Append(src, copied, st + m.Groups[1].Index - copied).Append(m.Groups[1].Value).Append(' ').Append(m.Groups[2].Value);
+                    init.Append(m.Groups[2].Value).Append(" = ").Append(m.Groups[3].Value).Append("; ");
+                    copied = i;
+                }
+                st = i + 1;
+            }
+        }
+        if (init.Length == 0) return src;
+        sb.Append(src, copied, src.Length - copied);
+        var res = sb.ToString();
+        var mf = MainFn.Match(res);
+        return mf.Success ? res.Insert(mf.Index + mf.Length, init.ToString()) : src;
+    }
+
+    static bool HasTopComma(string e)
+    {
+        int d = 0;
+        foreach (var c in e) { if (c is '(' or '[') d++; else if (c is ')' or ']') d--; else if (c == ',' && d == 0) return true; }
+        return false;
     }
 
     // pictures uploaded top row first set _flip; every IMG_* macro reads through _x_px

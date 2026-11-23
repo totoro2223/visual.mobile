@@ -4,8 +4,12 @@ namespace Visual.Core;
 public sealed class AutoDj
 {
     public bool Enabled { get; set; } = true;
-    public int Bars { get; set; } = 16;      // a change every this many bars
-    public bool Drops { get; set; } = true;  // cut at once on a drop; change on the next "1" when the energy jumps
+    public int Bars { get; set; } = 16;      // a change every this many bars (the least, with RandomBars)
+    public bool RandomBars { get; set; }     // each scene lasts a random number of bars between Bars and BarsMax
+    public int BarsMax { get; set; } = 32;
+    public bool Drops { get; set; } = true;  // cut at once on a drop; change on the next "1" when the intensity (energy) jumps
+    /// <summary>0..1, how big an energy change has to be to count as a drop or jump: 1 = very touchy, 0.5 = default.</summary>
+    public float Sensitivity { get; set; } = 0.5f;
 }
 
 /// <summary>
@@ -20,7 +24,7 @@ public sealed class AutoDjRunner(Random? rng = null)
     const int DropMinBars = 2, JumpMinBars = 4;
 
     readonly Random rng = rng ?? new();
-    int scene = -1, last = -1, jump; // jump: -1 energy fell, +1 rose (change on the next "1")
+    int scene = -1, last = -1, jump, target; // target: bars this scene lasts (0 = pick) // jump: -1 energy fell, +1 rose (change on the next "1")
     double prevPhase;
     float sinceSure = float.MaxValue, low = 100, sceneEnergy, dropFor;
     bool armed;
@@ -33,16 +37,23 @@ public sealed class AutoDjRunner(Random? rng = null)
     public string Pending { get; private set; } = "";
     public string LastChange { get; private set; } = "";
 
+    /// <summary>Bars the current scene lasts before the change.</summary>
+    public int Target(AutoDj c) => target > 0 ? target : c.Bars;
+
+    int PickTarget(AutoDj c) => c.RandomBars ? rng.Next(c.Bars, Math.Max(c.Bars, c.BarsMax) + 1) : c.Bars;
+
     public string Status(AutoDj c, Project p) =>
         !c.Enabled ? "Apagado"
         : p.Scenes.Count < 2 ? "Hace falta más de una escena"
         : !Active ? "Esperando música con ritmo claro; mientras, cada escena usa su duración"
-        : $"Compás {Bar + 1}/{c.Bars}" + (Pending != "" ? $" · cambia en el próximo 1 ({Pending})" : "");
+        : $"Compás {Bar + 1}/{Target(c)}" + (Pending != "" ? $" · cambia en el próximo 1 ({Pending})" : "");
 
     public void Update(AutoDj c, Player pl, MusicMeter m, float dt)
     {
         var sc = pl.Project.Scenes;
+        float k = 1.5f - Math.Clamp(c.Sensitivity, 0, 1); // thresholds scale: 0.5 (touchy) .. 1.5 (calm)
         if (pl.Current != scene) Reset(pl, m.Energy); // changed by hand, by duration or by the auto strobe
+        if (target == 0 || (!c.RandomBars && target != c.Bars) || target < c.Bars || target > Math.Max(c.Bars, c.BarsMax)) target = PickTarget(c);
         sinceSure = m.Locked || m.Confidence >= 0.5f ? 0 : sinceSure + dt;
         Active = c.Enabled && m.Bpm > 0 && !m.Silence && sinceSure < TrustSeconds && sc.Count > 1;
         pl.AutoDriving = Active;
@@ -53,8 +64,8 @@ public sealed class AutoDjRunner(Random? rng = null)
         // drop: the fast energy jumps well above the recent low (a break or build-up) and stays there a moment
         // (only measured while active: music starting after silence isn't a drop)
         low = Active ? MathF.Min(m.Energy, low + LowRise * dt) : 100;
-        if (m.Punch - low < DropRise / 2) armed = true;
-        dropFor = m.Punch - low > DropRise && m.Punch >= StrongFrom ? dropFor + dt : 0;
+        if (m.Punch - low < DropRise * k / 2) armed = true;
+        dropFor = m.Punch - low > DropRise * k && m.Punch >= StrongFrom ? dropFor + dt : 0;
         if (!Active) return;
 
         if (c.Drops && armed && dropFor >= DropHold && Bar >= DropMinBars)
@@ -66,11 +77,11 @@ public sealed class AutoDjRunner(Random? rng = null)
             return;
         }
         if (c.Drops && jump == 0 && Bar >= JumpMinBars)
-            jump = m.Energy < sceneEnergy - JumpBy ? -1 : m.Energy > sceneEnergy + JumpBy ? 1 : 0;
+            jump = m.Energy < sceneEnergy - JumpBy * k ? -1 : m.Energy > sceneEnergy + JumpBy * k ? 1 : 0;
         Pending = jump < 0 ? "bajó la energía" : jump > 0 ? "subió la energía" : "";
         if (!downbeat) return;
         Bar++;
-        if (jump == 0 && Bar < c.Bars) return;
+        if (jump == 0 && Bar < target) return;
         // the slow energy is still on its way after a jump: the fast one says where it goes
         float e = jump < 0 ? MathF.Min(m.Energy, m.Punch) : jump > 0 ? MathF.Max(m.Energy, m.Punch) : m.Energy;
         Change(pl, e < SoftBelow ? 1 : e < StrongFrom ? 2 : 3, Pending != "" ? Pending : $"{Bar} compases", e);
@@ -94,6 +105,7 @@ public sealed class AutoDjRunner(Random? rng = null)
         last = scene;
         scene = pl.Current;
         Bar = 0;
+        target = 0;
         jump = 0;
         Pending = "";
         sceneEnergy = energy;

@@ -178,9 +178,22 @@ sealed partial class App
         int b = Math.Max(0, Array.IndexOf(DjBars, c.Bars));
         ImGui.SetNextItemWidth(160);
         if (ImGui.Combo("Cambiar cada", ref b, DjBarNames, DjBarNames.Length)) c.Bars = DjBars[b];
+        bool rnd = c.RandomBars;
+        if (ImGui.Checkbox("Duración al azar (entre dos valores)", ref rnd)) c.RandomBars = rnd;
+        if (rnd)
+        {
+            int mx = Math.Max(0, Array.IndexOf(DjBars, c.BarsMax));
+            ImGui.SetNextItemWidth(160);
+            if (ImGui.Combo("Máximo", ref mx, DjBarNames, DjBarNames.Length)) c.BarsMax = Math.Max(DjBars[mx], c.Bars);
+        }
+        if (c.BarsMax < c.Bars) c.BarsMax = c.Bars;
         bool drops = c.Drops;
-        if (ImGui.Checkbox("Reaccionar a drops y cortes", ref drops)) c.Drops = drops;
+        if (ImGui.Checkbox("Cambiar al cambiar la intensidad (y en drops)", ref drops)) c.Drops = drops;
         if (ImGui.IsItemHovered()) ImGui.SetTooltip("En un drop corta enseguida a una escena fuerte; si la energía sube o baja mucho, cambia en el próximo 1");
+        float sens = c.Sensitivity;
+        ImGui.SetNextItemWidth(160);
+        if (ImGui.SliderFloat("Sensibilidad", ref sens, 0, 1)) c.Sensitivity = sens;
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Más alta = reacciona a cambios más chicos de energía");
         ImGui.EndDisabled();
         var dj = renderer.AutoDj;
         if (dj.Active) BoldText(dj.Status(c, project)); else ImGui.TextDisabled(dj.Status(c, project));
@@ -263,8 +276,8 @@ sealed partial class App
         ImGui.SetCursorPosX(ImGui.GetCursorPosX() + x);
         double t = player.SceneTime;
         if (player.AutoDriving) // the Auto DJ decides: bars instead of seconds
-            ImGui.ProgressBar(Math.Clamp(renderer.AutoDj.Bar / (float)project.AutoDj.Bars, 0, 1), new Vector2(-1, 0),
-                $"Auto DJ · compás {renderer.AutoDj.Bar + 1} / {project.AutoDj.Bars}");
+            ImGui.ProgressBar(Math.Clamp(renderer.AutoDj.Bar / (float)renderer.AutoDj.Target(project.AutoDj), 0, 1), new Vector2(-1, 0),
+                $"Auto DJ · compás {renderer.AutoDj.Bar + 1} / {renderer.AutoDj.Target(project.AutoDj)}");
         else if (s.Duration > 0)
             ImGui.ProgressBar((float)Math.Clamp(t / s.Duration, 0, 1), new Vector2(-1, 0), $"{t:0} / {s.Duration:0.#} s");
         else ImGui.TextDisabled($"{t:0} s");
@@ -383,6 +396,8 @@ sealed partial class App
 
     static void SceneCanvasEditor(Scene scene)
     {
+        int qi = scene.Quality > 0 ? 1 + Array.IndexOf(Scales, Scales.MinBy(s => MathF.Abs(s - scene.Quality))) : 0;
+        if (ImGui.Combo("Calidad de esta escena", ref qi, ["Global", .. ScaleNames], ScaleNames.Length + 1)) scene.Quality = qi == 0 ? 0 : Scales[qi - 1];
         bool own = scene.Canvas != null;
         if (ImGui.Checkbox("Lienzo propio (reemplaza el global)", ref own)) scene.Canvas = own ? new SceneCanvas() : null;
         if (ImGui.IsItemHovered()) ImGui.SetTooltip("Solo para esta escena. En píxeles de la salida (visor, ventana de salida o pantalla del TV).");

@@ -97,6 +97,10 @@ public static class EffectDefs
         new("maskW", "Máscara ancho", 0, 1, 1),      // 1 = whole screen
         new("maskH", "Máscara alto", 0, 1, 1),
         new("maskSoft", "Máscara borde", 0, 0.5f, 0), // 0 hard edge, higher = blurred
+        new("maskRepX", "Máscara repetir horizontal", 1, 16, 1), // the screen is cut into this many columns, each with its own mask
+        new("maskRepY", "Máscara repetir vertical", 1, 16, 1),
+        new("maskSepX", "Máscara separación horizontal", 0, 1, 1), // 1 = spread over the screen, 0 = copies touching in the middle
+        new("maskSepY", "Máscara separación vertical", 0, 1, 1),
     ];
 
     static readonly Dictionary<string, EffectDef> byName = All.ToDictionary(d => d.Name);
@@ -114,7 +118,7 @@ public static class EffectDefs
 
     /// <summary>Short names of the effects a scene is using; the strobe counts once, by its rate.</summary>
     public static string[] ActiveLabels(Dictionary<string, ParamState> fx) => All
-        .Where(d => d.Name is not ("strobeDuty" or "strobeIntensity" or "strobeMode" or "strobeHue" or "tintHue" or "maskX" or "maskY" or "maskSoft" or "tiltY" or "tiltPersp")
+        .Where(d => d.Name is not ("strobeDuty" or "strobeIntensity" or "strobeMode" or "strobeHue" or "tintHue" or "maskX" or "maskY" or "maskSoft" or "maskRepX" or "maskRepY" or "maskSepX" or "maskSepY" or "tiltY" or "tiltPersp")
                     && fx.TryGetValue(d.Name, out var ps) && IsActive(d, ps))
         .Select(d => d.Name == "strobeRate" ? "Strobe" : d.Name.StartsWith("mask") ? "Máscara" : d.Name.StartsWith("tilt") ? "Inclinación" : d.Label)
         .Distinct()
@@ -128,7 +132,7 @@ public static class EffectDefs
         uniform float mixB;
         uniform float layer; // 1 = a layer: opacity, mask and its shader's alpha go to the alpha (premultiplied), for the blend
         uniform vec2 RENDERSIZE;
-        uniform float brightness, contrast, saturation, hue, zoom, rotation, kaleido, chroma, vignette, feedback, tint, tintHue, opacity, strobe, strobeMode, strobeHue, maskX, maskY, maskW, maskH, maskSoft, tiltX, tiltY, tiltPersp;
+        uniform float brightness, contrast, saturation, hue, zoom, rotation, kaleido, chroma, vignette, feedback, tint, tintHue, opacity, strobe, strobeMode, strobeHue, maskX, maskY, maskW, maskH, maskSoft, maskRepX, maskRepY, maskSepX, maskSepY, tiltX, tiltY, tiltPersp;
         varying vec2 isf_FragNormCoord;
         const float TAU = 6.2831853;
 
@@ -188,7 +192,11 @@ public static class EffectDefs
             if (layer < 0.5) c *= opacity;
             vec3 s = strobeMode < 0.5 ? vec3(1.0) : (strobeMode < 1.5 ? vec3(0.0) : (strobeMode < 2.5 ? 1.0 - c : pure(strobeHue)));
             // mask: d < 0 inside the rectangle; the soft edge fades inward over maskSoft
-            vec2 d = abs(isf_FragNormCoord - vec2(maskX, maskY)) - 0.5 * vec2(maskW, maskH);
+            // repeat: n copies per axis, pitch p from touching (sep 0, grouped around maskX/Y) to spread over the screen (sep 1)
+            vec2 n = floor(vec2(maskRepX, maskRepY) + 0.5), sep = vec2(maskSepX, maskSepY), mc = vec2(maskX, maskY), mw = vec2(maskW, maskH) / n;
+            vec2 pitch = max(mix(mw, 1.0 / n, sep), 0.0001);
+            vec2 u = (isf_FragNormCoord - mix(mc, (mc + (n - 1.0) * 0.5) / n, sep)) / pitch + (n - 1.0) * 0.5;
+            vec2 d = abs((u - clamp(floor(u + 0.5), 0.0, n - 1.0)) * pitch) - 0.5 * mw;
             vec2 m = clamp(-d / max(maskSoft, 0.0001), 0.0, 1.0);
             m = m * m * (3.0 - 2.0 * m);
             c = clamp(mix(c, s, strobe), 0.0, 1.0) * onPlane;

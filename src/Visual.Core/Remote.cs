@@ -296,12 +296,13 @@ public static class Remote
             }),
             Layer.BlendNames,
             Canvas = scene?.Canvas,
+            Quality = scene?.Quality ?? 0,
             p.AutoStrobe,
             AutoPlaying = auto?.Active == true ? auto.Current : -1,
             Bands = audio.Bands.Raw,
             Music = new { audio.Music.Energy, audio.Music.Bpm, audio.Music.Confidence, audio.Music.Locked, audio.Music.Silence, audio.Music.BarPhase },
             p.AutoDj,
-            Dj = dj == null ? null : new { dj.Active, dj.Bar, Status = dj.Status(p.AutoDj, p), dj.LastChange },
+            Dj = dj == null ? null : new { dj.Active, dj.Bar, Target = dj.Target(p.AutoDj), Status = dj.Status(p.AutoDj, p), dj.LastChange },
             MaxHz = maxHz,
             Strobe = strobe,
             Device = device, // host-only settings (Android: audio source, quality); null on PC
@@ -320,6 +321,9 @@ public static class Remote
         {
             case "next": pl.Next(); break;
             case "goto": pl.GoTo(Int(c, "i")); break;
+            case "quality": // 0 = the global one
+                if (SceneAt(p, Int(c, "scene")) is { } qs) qs.Quality = Float(c, "value") is var q && float.IsFinite(q) && q > 0 ? Math.Clamp(q, 0.25f, 1f) : 0;
+                break;
             case "duration":
                 if (SceneAt(p, Int(c, "scene")) is { } d) d.Duration = Math.Max(0, Float(c, "value"));
                 break;
@@ -390,7 +394,12 @@ public static class Remote
                 if (SceneAt(p, Int(c, "scene")) is { } ins) ins.Intensity = Math.Clamp(Int(c, "value"), 0, 3);
                 break;
             case "autodj":
-                if (c["value"].Deserialize<AutoDj>(Json) is { } dj) p.AutoDj = new AutoDj { Enabled = dj.Enabled, Bars = Math.Clamp(dj.Bars, 1, 64), Drops = dj.Drops };
+                if (c["value"].Deserialize<AutoDj>(Json) is { } dj) p.AutoDj = new AutoDj
+                    {
+                        Enabled = dj.Enabled, Bars = Math.Clamp(dj.Bars, 1, 64), Drops = dj.Drops, RandomBars = dj.RandomBars,
+                        BarsMax = Math.Clamp(dj.BarsMax, Math.Clamp(dj.Bars, 1, 64), 64),
+                        Sensitivity = float.IsFinite(dj.Sensitivity) ? Math.Clamp(dj.Sensitivity, 0, 1) : 0.5f,
+                    };
                 break;
             case "autostrobe":
                 if (c["value"].Deserialize<AutoStrobe>(Json) is { } a)
