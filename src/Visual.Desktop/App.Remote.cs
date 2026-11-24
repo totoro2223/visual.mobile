@@ -41,6 +41,9 @@ sealed partial class App
                         strobeUntil = c["on"]?.GetValue<bool>() == true ? remoteClock + 1 : 0;
                         break;
                     case "save": SaveProject(); break;
+                    case "hold": // blackout / freeze / invert, re-sent while held like the strobe
+                        renderer.Hold(c["what"]?.GetValue<string>() ?? "", c["on"]?.GetValue<bool>() == true);
+                        break;
                     case "surprise": // the scene's inputs are known here
                         if (c["scene"]?.GetValue<int>() is int si && si >= 0 && si < player.Project.Scenes.Count)
                             Surprise.Apply(player.Project.Scenes[si], renderer.Get(player.Project.Scenes[si].Shader).Isf, Random.Shared);

@@ -66,6 +66,8 @@ public static class EffectDefs
 
     /// <summary>Also the auto strobe's modes. 3 uses the hue, 4 picks a new one each flash. Before All: statics initialize in order.</summary>
     public static readonly string[] StrobeModes = ["Blanco", "Negro", "Invertir", "Color", "Color al azar"];
+    /// <summary>Screen styles. Lines in haze read as sheets of light; the grain only scales light, so black stays black.</summary>
+    public static readonly string[] StyleNames = ["Nada", "Líneas horizontales", "Líneas verticales", "Grano", "Tramado", "Posterizado", "Puntos"]; // puntos: one dot per cell, a separate beam each
 
     public static readonly EffectDef[] All =
     [
@@ -82,6 +84,13 @@ public static class EffectDefs
         new("tiltPersp", "Perspectiva", 0.2f, 3, 1), // higher = the far side shrinks more
         new("chroma", "Aberración cromática", 0, 0.05f, 0),
         new("vignette", "Viñeta", 0, 1, 0),
+        new("edges", "Solo bordes", 0, 1, 0),        // only the outlines, at full brightness: lines (sheets in haze)
+        new("edgesWidth", "Bordes grosor", 0.5f, 8, 1.5f), // pixels
+        new("bloom", "Resplandor", 0, 2, 0),          // halo around what is very bright
+        new("glitch", "Glitch al ritmo", 0, 1, 0),    // bands shifted and colors split on each beat (on bass hits without BPM)
+        new("style", "Estilo", 0, 6, 0, StyleNames),
+        new("styleAmount", "Estilo intensidad", 0, 1, 1),
+        new("styleSize", "Estilo tamaño", 1, 40, 4), // pixels per line / dot; posterized: levels
         new("feedback", "Feedback", 0, 0.98f, 0),
         // the trail: last frame grown (zoom > 1), turned (turns per frame) and shifted in color each frame
         new("feedbackZoom", "Feedback zoom", 0.9f, 1.1f, 1.01f),
@@ -118,11 +127,11 @@ public static class EffectDefs
 
     /// <summary>Effects shown and moved together (strobe, mask, monocolor): one in use pulls in its siblings.</summary>
     public static string Group(string name) =>
-        name.StartsWith("strobe") ? "strobe" : name.StartsWith("mask") ? "mask" : name.StartsWith("tint") ? "tint" : name.StartsWith("tilt") ? "tilt" : name.StartsWith("feedback") ? "feedback" : name;
+        name.StartsWith("strobe") ? "strobe" : name.StartsWith("mask") ? "mask" : name.StartsWith("tint") ? "tint" : name.StartsWith("tilt") ? "tilt" : name.StartsWith("feedback") ? "feedback" : name.StartsWith("style") ? "style" : name.StartsWith("edges") ? "edges" : name;
 
     /// <summary>Short names of the effects a scene is using; the strobe counts once, by its rate.</summary>
     public static string[] ActiveLabels(Dictionary<string, ParamState> fx) => All
-        .Where(d => d.Name is not ("strobeDuty" or "strobeIntensity" or "strobeMode" or "strobeHue" or "tintHue" or "maskX" or "maskY" or "maskSoft" or "maskRepX" or "maskRepY" or "maskSepX" or "maskSepY" or "tiltY" or "tiltPersp" or "feedbackZoom" or "feedbackRot" or "feedbackHue")
+        .Where(d => d.Name is not ("strobeDuty" or "strobeIntensity" or "strobeMode" or "strobeHue" or "tintHue" or "maskX" or "maskY" or "maskSoft" or "maskRepX" or "maskRepY" or "maskSepX" or "maskSepY" or "tiltY" or "tiltPersp" or "feedbackZoom" or "feedbackRot" or "feedbackHue" or "styleAmount" or "styleSize" or "edgesWidth")
                     && fx.TryGetValue(d.Name, out var ps) && IsActive(d, ps))
         .Select(d => d.Name == "strobeRate" ? "Strobe" : d.Name.StartsWith("mask") ? "Máscara" : d.Name.StartsWith("tilt") ? "Inclinación" : d.Label)
         .Distinct()
@@ -137,7 +146,10 @@ public static class EffectDefs
         uniform float trans; // Transition shape while mixB is between 0 and 1
         uniform float layer; // 1 = a layer: opacity, mask and its shader's alpha go to the alpha (premultiplied), for the blend
         uniform vec2 RENDERSIZE;
-        uniform float brightness, contrast, saturation, hue, zoom, rotation, kaleido, chroma, vignette, feedback, tint, tintHue, opacity, feedbackZoom, feedbackRot, feedbackHue, strobe, strobeMode, strobeHue, maskX, maskY, maskW, maskH, maskSoft, maskRepX, maskRepY, maskSepX, maskSepY, tiltX, tiltY, tiltPersp;
+        uniform float palette, paletteMix, blackCut; // the project's look; 0 in a layer's pass (applied once, at the end)
+        uniform float blackout, invert;              // held buttons; 0 in a layer's pass
+        uniform float hit, seed, now;                // glitch: 1 on a beat, its random pattern; now = seconds (grain)
+        uniform float brightness, contrast, saturation, hue, zoom, rotation, kaleido, chroma, vignette, feedback, tint, tintHue, opacity, feedbackZoom, feedbackRot, feedbackHue, edges, edgesWidth, bloom, glitch, style, styleAmount, styleSize, strobe, strobeMode, strobeHue, maskX, maskY, maskW, maskH, maskSoft, maskRepX, maskRepY, maskSepX, maskSepY, tiltX, tiltY, tiltPersp;
         varying vec2 isf_FragNormCoord;
         const float TAU = 6.2831853;
 
@@ -206,13 +218,58 @@ public static class EffectDefs
 
         vec3 pure(float h) { return clamp(abs(mod(h * 6.0 + vec3(0.0, 4.0, 2.0), 6.0) - 3.0) - 1.0, 0.0, 1.0); } // full color of that hue
 
+        // the project's palette: black, then three colors, by how bright the pixel is (its strongest channel)
+        vec3 paletteColor(float t) {
+            vec3 b = vec3(1.0, 0.0, 0.0), m = vec3(0.0, 1.0, 0.0), e = vec3(0.0, 0.0, 1.0);                       // laser RGB
+            if (palette > 1.5) { m = vec3(1.0, 1.0, 0.0); e = vec3(0.0, 1.0, 0.0); }                             // rojo y verde
+            if (palette > 2.5) { b = vec3(0.0, 0.0, 1.0); m = vec3(0.6, 0.0, 1.0); e = vec3(0.0, 1.0, 1.0); }    // azul y violeta
+            if (palette > 3.5) { b = vec3(1.0, 0.0, 0.0); m = vec3(1.0, 0.45, 0.0); e = vec3(1.0, 1.0, 0.0); }   // fuego
+            if (palette > 4.5) { b = vec3(0.0, 0.0, 1.0); m = vec3(0.0, 1.0, 1.0); e = vec3(1.0); }              // hielo
+            if (palette > 5.5) { b = vec3(1.0, 0.0, 1.0); m = vec3(0.0, 1.0, 1.0); e = vec3(1.0); }              // neon
+            if (palette > 6.5) { b = vec3(0.0, 0.4, 0.0); m = vec3(0.0, 1.0, 0.0); e = vec3(0.6, 1.0, 0.6); }    // solo verde
+            t = clamp(t, 0.0, 1.0) * 3.0;
+            return t < 1.0 ? b * t : t < 2.0 ? mix(b, m, t - 1.0) : mix(m, e, t - 2.0);
+        }
+
+        // ordered dither threshold 0..1 for a 4x4 cell pattern
+        float bayer2(vec2 a) { a = floor(a); return fract(a.x / 2.0 + a.y * a.y * 0.75); }
+        float bayer4(vec2 a) { return bayer2(0.5 * a) * 0.25 + bayer2(a); }
+
+        float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+
         void main() {
-            vec2 uv = geometry(isf_FragNormCoord);
-            vec2 off = (uv - 0.5) * chroma;
+            vec2 fc = isf_FragNormCoord;
+            float dotCell = max(styleSize, 2.0);
+            bool dots = style > 5.5 && styleAmount > 0.0;
+            if (dots) fc = (floor(fc * RENDERSIZE / dotCell) + 0.5) * dotCell / RENDERSIZE; // the cell's center color
+            vec2 uv = geometry(fc);
+            float g = glitch * hit;
+            if (g > 0.0) { // some horizontal bands slide sideways
+                float band = floor(isf_FragNormCoord.y * 16.0);
+                if (hash(vec2(band, seed)) > 0.5) uv.x += (hash(vec2(seed, band + 3.1)) - 0.5) * 0.25 * g;
+            }
+            vec2 off = (uv - 0.5) * chroma + vec2(0.015 * g, 0.0);
             vec3 c = vec3(scene(uv + off).r, scene(uv).g, scene(uv - off).b);
+            if (edges > 0.0) { // brightness changes across a few pixels become lines, in the color of the bright side at full strength
+                vec2 e = edgesWidth / RENDERSIZE;
+                vec3 l = scene(uv - vec2(e.x, 0.0)), r = scene(uv + vec2(e.x, 0.0)), dn = scene(uv - vec2(0.0, e.y)), up = scene(uv + vec2(0.0, e.y));
+                float m = smoothstep(0.04, 0.15, length(vec2(luma(r) - luma(l), luma(up) - luma(dn))));
+                vec3 hi = max(max(l, r), max(dn, up));
+                hi /= max(max(max(hi.r, hi.g), hi.b), 0.05);
+                c = mix(c, clamp(hi, 0.0, 1.0) * m, edges);
+            }
             c = (c + brightness - 0.5) * contrast + 0.5;
             c = mix(vec3(dot(c, vec3(0.299, 0.587, 0.114))), c, saturation);
             c = hueShift(c, hue);
+            if (bloom > 0.0) { // light above 0.5 spread around, 12 taps on two rings
+                vec2 asp = vec2(RENDERSIZE.x / RENDERSIZE.y, 1.0);
+                vec3 glow = vec3(0.0);
+                for (int i = 0; i < 12; i++) {
+                    float a = float(i) * 0.5236, r = i < 6 ? 0.012 : 0.03;
+                    glow += max(scene(uv + vec2(cos(a), sin(a)) * r / asp) - 0.5, 0.0);
+                }
+                c += glow / 12.0 * bloom * 2.0;
+            }
             if (feedback > 0.0) {
                 vec2 asp = vec2(RENDERSIZE.x / RENDERSIZE.y, 1.0);
                 float fa = feedbackRot * TAU;
@@ -222,6 +279,20 @@ public static class EffectDefs
             }
             c *= 1.0 - vignette * smoothstep(0.2, 0.8, length(isf_FragNormCoord - 0.5));
             c = mix(c, dot(c, vec3(0.299, 0.587, 0.114)) * pure(tintHue), tint);
+            if (palette > 0.5) c = mix(c, paletteColor(max(max(c.r, c.g), c.b)), paletteMix);
+            c = max(c - blackCut, 0.0) / (1.0 - blackCut); // dim gray off: in haze it lights the smoke
+            if (style > 0.5 && styleAmount > 0.0) {
+                vec2 px = isf_FragNormCoord * RENDERSIZE;
+                float sz = max(styleSize, 1.0);
+                vec3 st = c;
+                if (style < 1.5) st *= step(0.5, fract(px.y / (2.0 * sz)));
+                else if (style < 2.5) st *= step(0.5, fract(px.x / (2.0 * sz)));
+                else if (style < 3.5) st *= 1.0 + (hash(floor(px / sz) + fract(now) * 91.7) - 0.5) * 1.2;
+                else if (style < 4.5) st = step(vec3(bayer4(px / sz)), clamp(c, 0.0, 1.0));
+                else if (style < 5.5) { float n = floor(clamp(sz, 2.0, 16.0)) - 1.0; st = floor(clamp(c, 0.0, 1.0) * n + 0.5) / n; }
+                else { vec2 q = fract(px / dotCell) - 0.5; st *= step(length(q) * dotCell, max(1.0, dotCell * 0.2)); } // round dot, ~40 % of the cell
+                c = mix(c, st, styleAmount);
+            }
             if (layer < 0.5) c *= opacity;
             vec3 s = strobeMode < 0.5 ? vec3(1.0) : (strobeMode < 1.5 ? vec3(0.0) : (strobeMode < 2.5 ? 1.0 - c : pure(strobeHue)));
             // mask: d < 0 inside the rectangle; the soft edge fades inward over maskSoft
@@ -233,6 +304,7 @@ public static class EffectDefs
             vec2 m = clamp(-d / max(maskSoft, 0.0001), 0.0, 1.0);
             m = m * m * (3.0 - 2.0 * m);
             c = clamp(mix(c, s, strobe), 0.0, 1.0) * onPlane;
+            c = mix(c, 1.0 - c, invert) * (1.0 - blackout);
             float a = layer < 0.5 ? 1.0 : clamp(texture2D(sceneA, uv).a, 0.0, 1.0) * opacity * m.x * m.y * onPlane;
             gl_FragColor = layer < 0.5 ? vec4(c * m.x * m.y, 1.0) : vec4(c * a, a);
         }

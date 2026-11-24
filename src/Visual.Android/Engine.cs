@@ -141,6 +141,9 @@ sealed class Engine : Java.Lang.Object, GLSurfaceView.IRenderer
                         strobeUntil = c["on"]?.GetValue<bool>() == true ? clock + 1 : 0;
                         break;
                     case "save": SaveProject(); break;
+                    case "hold": // blackout / freeze / invert, re-sent while held like the strobe
+                        renderer?.Hold(c["what"]?.GetValue<string>() ?? "", c["on"]?.GetValue<bool>() == true);
+                        break;
                     case "surprise": // the scene's inputs are known here
                         if (renderer != null && c["scene"]?.GetValue<int>() is int si && si >= 0 && si < Player.Project.Scenes.Count)
                             Surprise.Apply(Player.Project.Scenes[si], renderer.Get(Player.Project.Scenes[si].Shader).Isf, Random.Shared);

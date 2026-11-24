@@ -38,6 +38,8 @@ button.sm.danger{background:#4a1c1c;border-color:#733;color:#fcc}
 .big{display:block;width:100%;padding:22px;margin:10px 0;font-size:22px;border-radius:12px;border:0;background:#2a2a2a;color:var(--fg)}
 #strobe{background:#5a1a1a;touch-action:none}
 #strobe.on{background:#fff;color:#000}
+button.hold{touch-action:none}
+button.hold.on{background:var(--acc);color:#000}
 .row{display:flex;align-items:center;gap:8px;margin:10px 0;flex-wrap:wrap}
 .row>label{flex:1 1 40%}
 .row>span{min-width:3.5em;text-align:right;color:var(--mut)}
@@ -48,6 +50,7 @@ input[type=range]{height:32px}
 .mod{margin:0 0 14px 6px;padding-left:10px;border-left:2px solid #333}
 .srow{display:flex;align-items:center;gap:6px;padding:8px;margin:6px 0;background:#262626;border-radius:8px}
 .srow.cur{outline:2px solid var(--acc)}
+.srow.skip>:not(.flow){opacity:.4}
 .sinfo{flex:1;min-width:0}
 .thumb{width:56px;height:32px;flex:none;border-radius:4px;background:#111;object-fit:cover}
 .sinfo>div:first-child{overflow-wrap:anywhere}
@@ -144,7 +147,7 @@ async function poll() {
     S = await r.json();
     document.getElementById('err').textContent = '';
     const s = JSON.stringify([tab, S.Project, S.Loaded, S.Projects, S.Shaders, S.Current, S.Scenes, S.Shuffle, S.Crossfade,
-      S.CrossfadeSeconds, S.Inputs, S.Params, S.Effects, S.AutoStrobe, S.AutoDj, S.MaxHz, S.Device, S.Canvas, S.Quality, S.Name, S.Media, S.MediaFiles, S.Layers, S.Transition, S.CrossfadeBars, S.CanUndo]);
+      S.CrossfadeSeconds, S.Inputs, S.Params, S.Effects, S.AutoStrobe, S.AutoDj, S.MaxHz, S.Device, S.Canvas, S.Quality, S.Name, S.Media, S.MediaFiles, S.Layers, S.Transition, S.CrossfadeBars, S.CanUndo, S.Palette, S.PaletteMix, S.BlackCut, S.DropAction]);
     // don't rebuild under the user's finger: wait until they stop touching / typing
     const typing = document.activeElement && document.activeElement.matches('select,input[type=number],input[type=text]');
     if (s !== sig && !busy && !typing && Date.now() - lastEdit > 1500) { sig = s; render(); }
@@ -395,6 +398,15 @@ function renderLive() {
   for (const n of ['pointerup', 'pointercancel', 'pointerleave']) st.addEventListener(n, off);
   st.oncontextmenu = e => e.preventDefault();
   add(st);
+  add(el('div', { class: 'row' }, ...[['blackout', 'NEGRO'], ['freeze', 'CONGELAR'], ['invert', 'INVERTIR']].map(([what, label]) => {
+    const b = btn(label, null, 'hold');
+    let h = null; // like the strobe: re-sent while held, the PC lets go 1 s after the last one
+    b.addEventListener('pointerdown', e => { e.preventDefault(); if (h) return; b.classList.add('on'); post({ op: 'hold', what, on: true }); h = setInterval(() => post({ op: 'hold', what, on: true }), 400); });
+    const up = () => { if (!h) return; clearInterval(h); h = null; b.classList.remove('on'); post({ op: 'hold', what, on: false }); };
+    for (const n of ['pointerup', 'pointercancel', 'pointerleave']) b.addEventListener(n, up);
+    b.oncontextmenu = e => e.preventDefault();
+    return b;
+  })), hint('Mientras los mantenés apretados: todo negro, imagen congelada o colores invertidos.'));
   add(chk('Auto strobe', S.AutoStrobe.Enabled, b => { S.AutoStrobe.Enabled = b; edit('auto', { op: 'autostrobe', value: S.AutoStrobe }); }));
   card('audio', 'Audio', 'c-param');
   add(el('div', { id: 'bands' }));
@@ -425,13 +437,16 @@ function renderLive() {
     edit('proj', { op: 'project', shuffle: b, crossfade: S.Crossfade, crossfadeSeconds: S.CrossfadeSeconds });
   }));
   if (!S.Scenes.length) add(hint('Todavía no hay escenas: agregalas en Archivos.'));
-  else add(hint('▶ pasa a esa escena. La casilla es la duración en segundos (0 = manual).'));
+  else add(hint('La tilde deja la escena en el flujo (destildada, Siguiente, la duración y el Auto DJ la saltean). ▶ pasa a esa escena. El número es la duración en segundos (0 = manual).'));
   // ▶ is the only way to switch (no accidental changes while scrolling); the playing one shows its time (live())
   S.Scenes.forEach((s, i) => {
     const cur = i === S.Current, n = S.Scenes.length;
     const dur = num(s.Duration, x => { s.Duration = x; edit('dur' + i, { op: 'duration', scene: i, value: x }); });
     dur.title = dur.ariaLabel = 'Duración (s), 0 = manual';
-    add(el('div', { class: 'srow' + (cur ? ' cur' : '') },
+    add(el('div', { class: 'srow' + (cur ? ' cur' : '') + (s.Skip ? ' skip' : '') },
+      el('input', { type: 'checkbox', className: 'flow', checked: !s.Skip, ariaLabel: 'En el flujo',
+        title: 'En el flujo. Destildada: Siguiente, la duración y el Auto DJ la saltean (con ▶ se reproduce igual)',
+        onchange: e => { s.Skip = !e.target.checked; e.target.closest('.srow').classList.toggle('skip', s.Skip); post({ op: 'flow', scene: i, on: e.target.checked }); } }),
       el('button', { class: 'sm play' + (cur ? ' on' : ''), textContent: '▶', ariaLabel: 'Pasar a esta escena', onclick: () => post({ op: 'goto', i }) }),
       s.Th ? el('img', { class: 'thumb', alt: '', src: `/thumb?k=${encodeURIComponent(K)}&i=${i}&v=${s.Th}` })
         : el('span', { class: 'thumb', title: 'Sin vista previa: aparece cuando la escena se reproduce' }),
@@ -610,7 +625,7 @@ const armed = new Set();
 // in use (with their siblings: strobe, mask, monocolor) apart from the rest, like the PC
 function fxEd(effects, base, kp) {
   const defs = S.EffectDefs.filter(d => effects && effects[d.Name]);
-  const grp = n => /^strobe/.test(n) ? 'strobe' : /^mask/.test(n) ? 'mask' : /^tint/.test(n) ? 'tint' : /^tilt/.test(n) ? 'tilt' : /^feedback/.test(n) ? 'feedback' : n;
+  const grp = n => /^strobe/.test(n) ? 'strobe' : /^mask/.test(n) ? 'mask' : /^tint/.test(n) ? 'tint' : /^tilt/.test(n) ? 'tilt' : /^feedback/.test(n) ? 'feedback' : /^style/.test(n) ? 'style' : /^edges/.test(n) ? 'edges' : n;
   const inUse = d => { // same as EffectDefs.IsActive
     const ps = effects[d.Name];
     if (ps.Off) return false;
@@ -618,7 +633,7 @@ function fxEd(effects, base, kp) {
     const [lo, hi] = range(ps.Mod, d.Min, d.Max);
     return Math.abs(Math.min(hi, Math.max(lo, ps.Value[0])) - d.Default) > 1e-4;
   };
-  const used = new Set(defs.filter(inUse).map(d => grp(d.Name)));
+  const used = new Set(defs.filter(d => inUse(d) || armed.has(JSON.stringify(base) + d.Name)).map(d => grp(d.Name))); // ticked stays on top
   const fx = d => { // ticked = in use (or just ticked to start moving it); unticked = locked; unticking keeps the settings (Off)
     const ps = effects[d.Name], key = JSON.stringify(base) + d.Name, act = inUse(d);
     const mk = () => ({ op: 'effect', ...base, name: d.Name, state: ps });
@@ -630,6 +645,7 @@ function fxEd(effects, base, kp) {
         if (cb.checked) { armed.add(key); ps.Off = false; } else { armed.delete(key); if (was) ps.Off = true; }
         box.classList.toggle('lock', !cb.checked); box.classList.toggle('act', inUse(d));
         edit(kp + 'e:' + d.Name, mk());
+        sig = ''; // regroup (ticked goes on top) once the edits settle
       } });
     box.append(...paramEd(d.Label, ps, d.Min, d.Max, d.Labels, kp + 'e:' + d.Name, mk, {
       cap: d.Name === 'strobeRate' ? S.MaxHz : undefined,
@@ -1006,7 +1022,8 @@ function renderProj() {
     btn('Subir proyecto (.json)…', () => pf.click())),
     hint('Solo la configuración: los shaders y videos tienen que estar en el equipo. Si el nombre ya existe, se guarda como "Nombre 2".'));
   const pj = () => edit('proj', { op: 'project', shuffle: S.Shuffle, crossfade: S.Crossfade, crossfadeSeconds: S.CrossfadeSeconds,
-    transition: TRANS_V.indexOf(S.Transition), crossfadeBars: S.CrossfadeBars });
+    transition: TRANS_V.indexOf(S.Transition), crossfadeBars: S.CrossfadeBars,
+    palette: S.Palette, paletteMix: S.PaletteMix, blackCut: S.BlackCut, dropAction: S.DropAction });
   add(chk('Orden aleatorio', S.Shuffle, b => { S.Shuffle = b; pj(); }),
       chk('Fundido entre escenas', S.Crossfade, b => { S.Crossfade = b; pj(); render(); }));
   if (S.Crossfade) add(
@@ -1014,6 +1031,12 @@ function renderProj() {
       sel('Duración', BAR_N, Math.max(0, BAR_V.indexOf(S.CrossfadeBars)), j => { S.CrossfadeBars = BAR_V[j]; pj(); }),
       slider('Duración del fundido (s)', S.CrossfadeSeconds, 0.1, 10, x => { S.CrossfadeSeconds = x; pj(); }),
       hint('En compases sigue el BPM; mientras no haya BPM usa los segundos.'));
+  add(sel('Paleta', S.PaletteNames, S.Palette, j => { S.Palette = j; pj(); render(); }));
+  if (S.Palette > 0) add(slider('Paleta intensidad', S.PaletteMix, 0, 1, x => { S.PaletteMix = x; pj(); }));
+  add(slider('Corte de negro', S.BlackCut, 0, 0.5, x => { S.BlackCut = x; pj(); }),
+      hint('Paleta: todas las escenas con esos colores según el brillo; el negro queda negro. Corte de negro: apaga las luces tenues (en humo, el gris ilumina todo el humo).'),
+      sel('En un drop', S.DropActionNames, S.DropAction, j => { S.DropAction = j; pj(); }),
+      hint('Un drop es cuando la música vuelve con fuerza después de una parte tranquila. Usa la sensibilidad del Auto DJ. Siguiente escena no actúa si el Auto DJ ya cambia en los drops.'));
 
   const a = S.AutoStrobe, go = () => edit('auto', { op: 'autostrobe', value: a }), now = () => { go(); S.AutoStrobe = a; render(); }; // S may be a newer poll's: show this edit now
   const C = a.Configs || (a.Configs = [{}]);

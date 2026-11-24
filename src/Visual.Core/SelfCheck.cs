@@ -129,7 +129,24 @@ public static class SelfCheck
         sb.Beats = 10.7;
         Check(Renderer.OldMix(spl, sb, 3, 0) == 1, "strobe al ritmo: la vieja al final del tiempo");
         Check(Renderer.OldMix(spl, sb, 1, 0) == 0, "strobe al ritmo: con el límite salta cada 2 tiempos");
+        // scenes out of the flow: Next and the durations skip them, ▶ (GoTo) still plays them; none left = stays
+        var fpl = new Player();
+        fpl.Start(new Project { Scenes = [new Scene(), new Scene { Skip = true }, new Scene()] });
+        fpl.Next();
+        Check(fpl.Current == 2, "flujo: salta la escena destildada");
+        fpl.Next();
+        Check(fpl.Current == 0, "flujo: vuelve al principio");
+        fpl.Project.Shuffle = true;
+        for (int r = 0; r < 20; r++) { fpl.Next(); Check(fpl.Current != 1, "flujo: al azar tampoco la elige"); }
+        fpl.GoTo(1);
+        Check(fpl.Current == 1, "flujo: con ▶ se reproduce igual");
+        foreach (var fs in fpl.Project.Scenes) fs.Skip = true;
+        fpl.Next();
+        Check(fpl.Current == 1, "flujo: sin escenas en el flujo se queda");
+        Check(!ProjectStore.ToJson(new Project { Scenes = [new Scene()] }).Contains("Skip"), "flujo: no se guarda si está en el flujo");
         ThumbSurpriseCheck();
+        // some GL drivers (Intel) fail with "pre-mature EOF" on any non-ASCII byte, even in a comment
+        Check(EffectDefs.PostFragment("").All(ch => ch < 128), "shader de efectos: solo ASCII");
 
         Check(BandOf(100) == 0, "100 Hz -> graves");
         Check(BandOf(1000) == 1, "1 kHz -> medios");
@@ -140,6 +157,11 @@ public static class SelfCheck
 
     static void ThumbSurpriseCheck()
     {
+        // the haze shaders ship next to the app (Windows: shaders folder; skipped where they aren't files)
+        var dir = Path.Combine(AppContext.BaseDirectory, "shaders");
+        foreach (var (f, inputs) in new[] { ("Haz Abanico.fs", 8), ("Haz Cono.fs", 7), ("Haz Lamina.fs", 8), ("Haz Barrido.fs", 5) })
+            if (File.Exists(Path.Combine(dir, f)))
+                Check(IsfShader.Load(dir, f) is { } hz && hz.Inputs.Count == inputs && hz.Inputs.Any(i => i.Name == "ritmo" && i.Type == IsfType.Long), $"shader de humo: {f}");
         var px = new byte[Thumbs.W * Thumbs.H * 4];
         for (int i = 0; i < px.Length; i++) px[i] = (byte)(i * 7);
         var rgb = Thumbs.Unpack(Thumbs.Pack(px));
@@ -365,6 +387,10 @@ public static class SelfCheck
         Check(!mm.Locked, "remoto: música en automático");
         Remote.Apply(Cmd("""{"op":"autodj","value":{"Enabled":false,"Bars":500,"Drops":false}}"""), pl, []);
         Check(pl.Project.AutoDj is { Enabled: false, Bars: 64, Drops: false }, "remoto: auto dj");
+        Remote.Apply(Cmd("""{"op":"project","palette":3,"paletteMix":2,"blackCut":0.9,"dropAction":3}"""), pl, []);
+        Check(pl.Project is { Palette: 3, PaletteMix: 1, BlackCut: 0.5f, DropAction: DropAction.Glitch }, "remoto: paleta, corte de negro y drop (con límites)");
+        Remote.Apply(Cmd("""{"op":"project","palette":99,"dropAction":9}"""), pl, []);
+        Check(pl.Project is { Palette: 3, DropAction: DropAction.Glitch }, "remoto: rechaza paleta y drop fuera de rango");
         Remote.Apply(Cmd("""{"op":"autodj","value":{"Enabled":true,"Bars":8,"RandomBars":true,"BarsMax":4,"Sensitivity":9}}"""), pl, []);
         Check(pl.Project.AutoDj is { RandomBars: true, Bars: 8, BarsMax: 8, Sensitivity: 1 }, "remoto: auto dj al azar y sensibilidad");
         Remote.Apply(Cmd("""{"op":"quality","scene":0,"value":0.1}"""), pl, []);

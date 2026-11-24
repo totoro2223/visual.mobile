@@ -278,7 +278,7 @@ public static class Remote
             Shaders = shaders,
             pl.Current,
             pl.SceneTime,
-            Scenes = p.Scenes.Select(s => new { s.Shader, s.Title, s.Duration, s.Intensity, s.Level, Fx = EffectDefs.ActiveLabels(s.Effects), Layers = s.Layers.Count, Th = s.ThumbKey }),
+            Scenes = p.Scenes.Select(s => new { s.Shader, s.Title, s.Duration, s.Intensity, s.Level, Fx = EffectDefs.ActiveLabels(s.Effects), Layers = s.Layers.Count, Th = s.ThumbKey, s.Skip }),
             Name = scene?.Name,
             Media = scene?.Media,
             MediaFiles = media,
@@ -288,6 +288,12 @@ public static class Remote
             p.Transition,
             p.CrossfadeBars,
             Project.TransitionNames,
+            p.Palette,
+            p.PaletteMix,
+            p.BlackCut,
+            Project.PaletteNames,
+            DropAction = (int)p.DropAction,
+            Project.DropActionNames,
             CanUndo = scene?.Undo != null,
             Inputs = Inputs(isf),
             Params = scene?.Params,
@@ -428,6 +434,10 @@ public static class Remote
                 p.CrossfadeSeconds = Math.Clamp(c["crossfadeSeconds"]?.GetValue<float>() ?? p.CrossfadeSeconds, 0.1f, 10f);
                 if (c["transition"]?.GetValue<int>() is int tr && tr >= 0 && tr <= (int)Transition.Random) p.Transition = (Transition)tr;
                 if (c["crossfadeBars"]?.GetValue<float>() is float fb && Project.BarChoices.Contains(fb)) p.CrossfadeBars = fb;
+                if (c["palette"]?.GetValue<int>() is int pal && pal >= 0 && pal < Project.PaletteNames.Length) p.Palette = pal;
+                if (c["paletteMix"]?.GetValue<float>() is float pm && float.IsFinite(pm)) p.PaletteMix = Math.Clamp(pm, 0, 1);
+                if (c["blackCut"]?.GetValue<float>() is float bc && float.IsFinite(bc)) p.BlackCut = Math.Clamp(bc, 0, Project.MaxBlackCut);
+                if (c["dropAction"]?.GetValue<int>() is int da && da >= 0 && da <= (int)DropAction.Glitch) p.DropAction = (DropAction)da;
                 break;
             case "music": // the phone's Tap sends the tempo it measured (Wi-Fi delays would spoil single taps)
                 if (c["bpm"] != null) music?.SetTempo(Float(c, "bpm"), Int(c, "beat"));
@@ -443,6 +453,9 @@ public static class Remote
                 break;
             case "remove":
                 if (Int(c, "i") is var i && i >= 0 && i < p.Scenes.Count) pl.Remove(i);
+                break;
+            case "flow": // the scene's "en el flujo" box
+                if (SceneAt(p, Int(c, "scene")) is { } flowScene) flowScene.Skip = c["on"]?.GetValue<bool>() == false;
                 break;
             case "surpriseUndo":
                 if (SceneAt(p, Int(c, "scene")) is { } us) Surprise.Undo(us);

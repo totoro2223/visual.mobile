@@ -53,6 +53,12 @@ public sealed unsafe class Renderer : IDisposable
     public double Time { get; private set; }
     public string ShaderFolder = "";
     public bool StrobeHeld;
+
+    /// <summary>"Mientras apretás" buttons: black, freeze, invert. The phone re-sends every 0.4 s while held; quiet for 1 s = released.</summary>
+    public static readonly string[] Holds = ["blackout", "freeze", "invert"];
+    readonly Dictionary<string, double> holdUntil = [];
+    public void Hold(string what, bool on) { if (Holds.Contains(what)) holdUntil[what] = on ? Time + 1 : 0; }
+    public bool Held(string what) => holdUntil.TryGetValue(what, out var t) && Time < t;
     /// <summary>Internal resolution as a fraction of the output (slow GPUs): draws smaller, stretched on screen.</summary>
     public float Scale = 1;
     /// <summary>The last finished frame (a texture, shareable with another GL context) and its size.</summary>
@@ -197,6 +203,7 @@ public sealed unsafe class Renderer : IDisposable
         if (autoStrobe.Update(player.Project.AutoStrobe, audio.Bands, dt, maxHz, blocked: sceneStrobe)
             && autoStrobe.Ended(player.Project.AutoStrobe)?.NextScene == true) player.Next();
         autoDj.Update(player.Project.AutoDj, player, audio.Music, dt);
+        OnDrop(player, audio.Music, dt);
         StrobeActive = sceneStrobe || autoStrobe.Active || StrobeHeld;
         gl.Disable(EnableCap.Blend);
         gl.Disable(EnableCap.ScissorTest);
@@ -218,12 +225,16 @@ public sealed unsafe class Renderer : IDisposable
         // ponytail: the safety limit counts every strobe's rate added up (an upper bound: flashes that coincide count twice)
         float total = StrobeTotal(player, Time, audio.Bands, maxHz, SceneStrobeRate(player, audio, maxHz));
         strobeScale = total > maxHz ? maxHz / total : 1;
-        DrawScene(player.Current >= 0 ? scenes[player.Current] : null, player.SceneTime, dt, ref sceneA, audio);
-        bool fading = player.Previous >= 0;
-        if (fading) DrawScene(scenes[player.Previous], player.PrevTime, dt, ref sceneB, audio);
-        DrawPost(player, audio, dt, fading ? OldMix(player, audio.Bands, maxHz, Time) : 0, maxHz);
-        MeasureMotion(player, dt);
-        TakeThumb(player);
+        bool frozen = Held("freeze") && !Held("blackout"); // the last frame stays (in pong); black still wins
+        if (!frozen)
+        {
+            DrawScene(player.Project, player.Current >= 0 ? scenes[player.Current] : null, player.SceneTime, dt, ref sceneA, audio);
+            bool fading = player.Previous >= 0;
+            if (fading) DrawScene(player.Project, scenes[player.Previous], player.PrevTime, dt, ref sceneB, audio);
+            DrawPost(player, audio, dt, fading ? OldMix(player, audio.Bands, maxHz, Time) : 0, maxHz);
+            MeasureMotion(player, dt);
+            TakeThumb(player);
+        }
 
         gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
         gl.Viewport(0, 0, (uint)screenW, (uint)screenH);
@@ -232,13 +243,13 @@ public sealed unsafe class Renderer : IDisposable
         int bx = x + (int)MathF.Round(f.X * width), by = y + (int)MathF.Round(f.Y * height);
         int bw = Math.Max(1, (int)MathF.Round(f.W * width)), bh = Math.Max(1, (int)MathF.Round(f.H * height));
         int y0 = screenH - by - bh; // GL counts from the bottom
-        gl.BindFramebuffer(FramebufferTarget.ReadFramebuffer, ping.Fbo);
+        gl.BindFramebuffer(FramebufferTarget.ReadFramebuffer, frozen ? pong.Fbo : ping.Fbo);
         gl.BindFramebuffer(FramebufferTarget.DrawFramebuffer, 0);
         gl.BlitFramebuffer(0, 0, w, h, bx, y0, bx + bw, y0 + bh, ClearBufferMask.ColorBufferBit,
             w == bw && h == bh ? BlitFramebufferFilter.Nearest : BlitFramebufferFilter.Linear);
         Placed = f;
         gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
-        (ping, pong) = (pong, ping);
+        if (!frozen) (ping, pong) = (pong, ping);
         // a video not drawn for half a second (scene ended / removed) is closed; it starts over next time
         foreach (var (k, s) in media.Where(kv => kv.Value.Used < frameIndex - 30).ToList())
         {
@@ -302,7 +313,7 @@ public sealed unsafe class Renderer : IDisposable
     }
 
     /// <summary>The scene's base shader, then each layer: its shader, its effects, mixed over what is below with its blend.</summary>
-    void DrawScene(Scene? scene, double time, float dt, ref Target target, AudioAnalyzer audio)
+    void DrawScene(Project project, Scene? scene, double time, float dt, ref Target target, AudioAnalyzer audio)
     {
         DrawPicture(scene, time, dt, target, audio);
         if (scene == null) return;
@@ -335,6 +346,7 @@ public sealed unsafe class Renderer : IDisposable
             gl.Uniform2(post.Loc(gl, "RENDERSIZE"), (float)w, (float)h);
             foreach (var d in EffectDefs.All)
                 if (!d.Name.StartsWith("strobe")) gl.Uniform1(post.Loc(gl, d.Name), E(d.Name));
+            SharedUniforms(project, audio.Bands, layer: true);
             float rate = Math.Clamp(E("strobeRate"), 0, maxHzNow) * strobeScale;
             st.StrobePhase = (st.StrobePhase + dt * rate) % 1.0;
             bool on = rate > 0 && st.StrobePhase < E("strobeDuty");
@@ -428,6 +440,7 @@ public sealed unsafe class Renderer : IDisposable
         var now = DateTime.Now;
         gl.Uniform1(p.Loc(gl, "TIME"), (float)time);
         gl.Uniform1(p.Loc(gl, "TIMEDELTA"), dt);
+        gl.Uniform1(p.Loc(gl, "VISUAL_BEATS"), (float)(audio.Bands.Bpm > 0 ? audio.Bands.Beats : Time * 2));
         gl.Uniform2(p.Loc(gl, "RENDERSIZE"), (float)w, (float)h);
         gl.Uniform1(p.Loc(gl, "FRAMEINDEX"), frameIndex);
         gl.Uniform4(p.Loc(gl, "DATE"), (float)now.Year, (float)now.Month, (float)now.Day, (float)now.TimeOfDay.TotalSeconds);
@@ -512,6 +525,45 @@ public sealed unsafe class Renderer : IDisposable
         return x - Math.Floor(x) < pl.Fade ? 0 : 1;
     }
 
+    readonly DropWatch drop = new();
+    float soundFor, dropCool, dropGlitch;
+
+    /// <summary>The project's drop action. Measured after 4 s of sound (music starting isn't a drop), at most one every 4 s.</summary>
+    void OnDrop(Player player, MusicMeter m, float dt)
+    {
+        var p = player.Project;
+        soundFor = m.Silence ? 0 : soundFor + dt;
+        dropCool -= dt;
+        dropGlitch -= dt;
+        drop.Update(m, dt, p.DropAction != DropAction.None && soundFor > 4, 1.5f - Math.Clamp(p.AutoDj.Sensitivity, 0, 1));
+        if (!drop.Ready) return;
+        drop.Take();
+        if (dropCool > 0) return;
+        dropCool = 4;
+        switch (p.DropAction)
+        {
+            case DropAction.NextScene when !(autoDj.Active && p.AutoDj.Drops): player.Next(); break; // the Auto DJ already cuts on drops
+            case DropAction.Strobe: autoStrobe.Start(p.AutoStrobe); break;
+            case DropAction.Glitch: dropGlitch = 1.5f; break;
+        }
+    }
+
+    /// <summary>Uniforms besides the effects: the project's look (not in a layer's pass) and the glitch's beat.</summary>
+    void SharedUniforms(Project p, AudioBands b, bool layer)
+    {
+        gl.Uniform1(post.Loc(gl, "palette"), layer ? 0f : Math.Clamp(p.Palette, 0, Project.PaletteNames.Length - 1));
+        gl.Uniform1(post.Loc(gl, "paletteMix"), Math.Clamp(p.PaletteMix, 0, 1));
+        gl.Uniform1(post.Loc(gl, "blackCut"), layer ? 0f : Math.Clamp(p.BlackCut, 0, Project.MaxBlackCut));
+        // on the first 15 % of each beat; without a BPM, on bass hits
+        bool hit = dropGlitch > 0 || (b.Bpm > 0 ? b.Beats - Math.Floor(b.Beats) < 0.15 : b.Get(Band.Bass, true) > 0.75f);
+        gl.Uniform1(post.Loc(gl, "hit"), hit ? 1f : 0f);
+        gl.Uniform1(post.Loc(gl, "seed"), (float)(Math.Floor(Time * 12) % 97)); // a new pattern 12 times a second
+        gl.Uniform1(post.Loc(gl, "now"), (float)(Time % 1000));
+        gl.Uniform1(post.Loc(gl, "blackout"), !layer && Held("blackout") ? 1f : 0f);
+        gl.Uniform1(post.Loc(gl, "invert"), !layer && Held("invert") ? 1f : 0f);
+        if (dropGlitch > 0) gl.Uniform1(post.Loc(gl, "glitch"), 0.8f);
+    }
+
     /// <summary>Effect value of the playing scene; during a crossfade it blends from the previous scene's value.</summary>
     float Fx(Player pl, AudioAnalyzer audio, string n)
     {
@@ -545,6 +597,7 @@ public sealed unsafe class Renderer : IDisposable
         gl.Uniform2(post.Loc(gl, "RENDERSIZE"), (float)w, (float)h);
         foreach (var d in EffectDefs.All)
             if (!d.Name.StartsWith("strobe")) gl.Uniform1(post.Loc(gl, d.Name), E(d.Name));
+        SharedUniforms(player.Project, audio.Bands, layer: false);
 
         // phase is integrated so an audio-modulated rate doesn't jump around
         // auto strobe bursts and the remote's "hold to strobe" use the auto strobe's own flash settings,
@@ -636,7 +689,7 @@ public sealed unsafe class Renderer : IDisposable
         var sc = pl.Project.Scenes;
         var s = pl.Current >= 0 && pl.Current < sc.Count ? sc[pl.Current] : null;
         if (s == null || pl.SceneTime < 2) { thumbOf = null; return; }
-        if (thumbOf == s || pl.Previous >= 0 || strobeWasOn || Get(s.Shader).Id == 0) return;
+        if (thumbOf == s || pl.Previous >= 0 || strobeWasOn || Held("blackout") || Held("invert") || Get(s.Shader).Id == 0) return;
         thumbOf = s;
         if (thumbTarget.Fbo == 0) thumbTarget = MakeTarget(false, Thumbs.W, Thumbs.H);
         gl.BindFramebuffer(FramebufferTarget.ReadFramebuffer, ping.Fbo);

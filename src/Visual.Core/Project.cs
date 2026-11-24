@@ -26,6 +26,8 @@ public abstract class Picture
 /// <summary>Shape of the change between scenes; Random picks one of the others each time.</summary>
 public enum Transition { Fade, Wipe, Circle, Blinds, Dissolve, Pixels, Zoom, Strobe, Random }
 
+public enum DropAction { None, NextScene, Strobe, Glitch }
+
 public enum BlendMode { Normal, Add, Subtract, Multiply, Screen, Overlay, SoftLight, HardLight, Difference, Exclusion, Lighten, Darken, Dodge, Burn, Hue, Color, Luminosity }
 
 /// <summary>Drawn over what is below it in the scene, with its own effects; a filter shader (input "inputImage") gets that picture.</summary>
@@ -60,6 +62,10 @@ public sealed class Scene : Picture
     /// <summary>Own canvas for this scene; null = the device's (global) one.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public SceneCanvas? Canvas { get; set; }
+
+    /// <summary>Left out of the flow: Next (in order or shuffled), the scene durations and the Auto DJ skip it; ▶ still plays it.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool Skip { get; set; }
 
     [JsonIgnore] public string Title => Name.Trim() != "" ? Name.Trim() : Shader;
 
@@ -121,6 +127,15 @@ public sealed class Project
     public static readonly string[] TransitionNames = ["Fundido", "Barrido", "Círculo", "Persianas", "Disolver", "Píxeles", "Zoom", "Strobe al ritmo", "Al azar"];
     public static readonly float[] BarChoices = [0, 0.5f, 1, 2, 4];
     public static readonly string[] BarNames = ["En segundos", "1/2 compás", "1 compás", "2 compases", "4 compases"];
+    /// <summary>Whole-show look over every scene: palette (0 = off, PaletteNames) and how much of it; dim light cut to black.</summary>
+    public int Palette { get; set; }
+    public float PaletteMix { get; set; } = 1;
+    public float BlackCut { get; set; }
+    public static readonly string[] PaletteNames = ["Apagada", "Láser RGB", "Rojo y verde", "Azul y violeta", "Fuego", "Hielo", "Neón", "Solo verde"];
+    public const float MaxBlackCut = 0.5f;
+    /// <summary>What a drop in the music does, with or without the Auto DJ.</summary>
+    public DropAction DropAction { get; set; }
+    public static readonly string[] DropActionNames = ["Nada", "Siguiente escena", "Ráfaga de strobe", "Glitch fuerte"];
     /// <summary>Only read from projects saved when effects were global; moved into the scenes by EnsureEffects.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public Dictionary<string, ParamState>? Effects { get; set; }
@@ -255,13 +270,21 @@ public sealed class Player
         SceneTime = 0;
     }
 
+    /// <summary>The next scene in the flow (skipped ones left out); the current one again if it is the only one, -1 if none.</summary>
     int PickNext()
     {
-        if (Count == 0) return -1;
-        if (!Project.Shuffle || Count == 1) return (Current + 1) % Count;
-        int r;
-        do r = rng.Next(Count); while (r == Current);
-        return r;
+        var sc = Project.Scenes;
+        if (Project.Shuffle)
+        {
+            var others = Enumerable.Range(0, Count).Where(i => i != Current && !sc[i].Skip).ToList();
+            if (others.Count > 0) return others[rng.Next(others.Count)];
+        }
+        for (int k = 1; k <= Count; k++)
+        {
+            int i = ((Current + k) % Count + Count) % Count; // Current is -1 before the first scene
+            if (!sc[i].Skip) return i;
+        }
+        return -1;
     }
 
     public void Move(int from, int to)

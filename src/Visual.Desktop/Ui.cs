@@ -110,6 +110,15 @@ sealed partial class App
         if (Section("Control###ctl", CStrobe))
         {
             if (ImGui.Button(project.Shuffle ? "Siguiente escena, al azar (N)" : "Siguiente escena (N)", new Vector2(-1, 0))) player.Next();
+            string[] holdLabels = ["Negro", "Congelar", "Invertir"];
+            for (int k = 0; k < Renderer.Holds.Length; k++)
+            {
+                if (k > 0) ImGui.SameLine();
+                ImGui.Button(holdLabels[k] + "##hold");
+                if (ImGui.IsItemActive()) renderer.Hold(Renderer.Holds[k], true);
+                if (ImGui.IsItemDeactivated()) renderer.Hold(Renderer.Holds[k], false);
+                if (ImGui.IsItemHovered()) ImGui.SetTooltip("Mientras lo mantenés apretado");
+            }
             var sc = project.Scenes;
             if (player.Current >= 0 && player.Current < sc.Count)
                 ImGui.TextDisabled($"Sonando: {player.Current + 1}/{sc.Count} · {sc[player.Current].Title} · {player.SceneTime:0} s");
@@ -223,7 +232,11 @@ sealed partial class App
         for (int i = 0; i < scenes.Count; i++)
         {
             var s = scenes[i];
-            bool playing = i == player.Current;
+            bool playing = i == player.Current, inFlow = !s.Skip;
+            if (ImGui.Checkbox($"##flow{i}", ref inFlow)) s.Skip = !inFlow;
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip(s.Skip ? "Fuera del flujo: Siguiente, la duración y el Auto DJ la saltean (con ▶ se reproduce igual)" : "En el flujo (destildá para saltearla)");
+            ImGui.SameLine();
+            if (s.Skip) ImGui.PushStyleVar(ImGuiStyleVar.Alpha, ImGui.GetStyle().Alpha * 0.45f);
             // ▶ is the only way to switch here (a click on the name just selects it for the buttons below)
             if (playing) ImGui.PushStyleColor(ImGuiCol.Button, Shade(CScene, 0.6f));
             if (ImGui.ArrowButton($"##play{i}", ImGuiDir.Right)) player.GoTo(i);
@@ -237,6 +250,7 @@ sealed partial class App
             var lvl = Scene.LevelNames[s.Level].ToLowerInvariant() + (s.Layers.Count switch { 0 => "", 1 => " · 1 capa", var c => $" · {c} capas" });
             if (ImGui.Selectable($"{i + 1}. {s.Title}   [{dur} · {lvl}]{(fx == "" ? "" : "   " + fx)}##scene{i}", i == selected)) selected = i;
             if (playing) SceneProgress(s);
+            if (s.Skip) ImGui.PopStyleVar();
         }
         if (scenes.Count == 0) ImGui.TextDisabled("Sin escenas: agregá shaders abajo.");
         if (selected >= scenes.Count) selected = scenes.Count - 1;
@@ -701,7 +715,7 @@ sealed partial class App
 
     static float Frac(float v, float min, float max) => max != min ? Math.Clamp((v - min) / (max - min), 0, 1) : 0;
 
-    // effects in use (with their siblings: strobe, mask, monocolor) on top, the rest folded below;
+    // effects in use or ticked (with their siblings: strobe, mask, monocolor) on top, the rest folded below;
     // the split waits while something is being dragged, so an effect doesn't jump away under the mouse
     readonly Dictionary<Picture, HashSet<string>> fxInUse = [];
 
@@ -710,7 +724,7 @@ sealed partial class App
         pic.EnsureEffects();
         if (fxInUse.Count > 64) fxInUse.Clear(); // pictures of closed projects
         if (!ImGui.IsAnyItemActive() || !fxInUse.ContainsKey(pic))
-            fxInUse[pic] = EffectDefs.All.Where(d => EffectDefs.IsActive(d, pic.Effects[d.Name])).Select(d => EffectDefs.Group(d.Name)).ToHashSet();
+            fxInUse[pic] = EffectDefs.All.Where(d => EffectDefs.IsActive(d, pic.Effects[d.Name]) || armed.Contains(pic.Effects[d.Name])).Select(d => EffectDefs.Group(d.Name)).ToHashSet();
         var used = EffectDefs.All.Where(d => fxInUse[pic].Contains(EffectDefs.Group(d.Name))).ToArray();
         return (used, EffectDefs.All.Except(used).ToArray());
     }
@@ -886,6 +900,20 @@ sealed partial class App
             if (ImGui.IsItemHovered()) ImGui.SetTooltip("En compases sigue el BPM; mientras no haya BPM usa los segundos");
             if (ImGui.SliderFloat("Duración del fundido (s)", ref s, 0.1f, 10f)) project.CrossfadeSeconds = s;
         }
+        int pal = Math.Clamp(project.Palette, 0, Project.PaletteNames.Length - 1);
+        if (ImGui.Combo("Paleta", ref pal, Project.PaletteNames, Project.PaletteNames.Length)) project.Palette = pal;
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Todas las escenas con esos colores según el brillo; el negro queda negro");
+        if (pal > 0)
+        {
+            float pm = project.PaletteMix;
+            if (ImGui.SliderFloat("Paleta intensidad", ref pm, 0, 1)) project.PaletteMix = pm;
+        }
+        float cut = project.BlackCut;
+        if (ImGui.SliderFloat("Corte de negro", ref cut, 0, Project.MaxBlackCut)) project.BlackCut = cut;
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Apaga las luces tenues: en humo, el gris ilumina todo el humo");
+        int da = Math.Clamp((int)project.DropAction, 0, Project.DropActionNames.Length - 1);
+        if (ImGui.Combo("En un drop", ref da, Project.DropActionNames, Project.DropActionNames.Length)) project.DropAction = (DropAction)da;
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Cuando la música vuelve con fuerza después de una parte tranquila (usa la sensibilidad del Auto DJ).\nSiguiente escena no actúa si el Auto DJ ya cambia en los drops");
     }
 
     void StartNew(Project p)

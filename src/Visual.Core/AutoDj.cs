@@ -20,14 +20,14 @@ public sealed class AutoDj
 public sealed class AutoDjRunner(Random? rng = null)
 {
     // ponytail: calibration knobs (energy points 0..100, seconds); tuned with synthetic music, retune with real sets
-    const float SoftBelow = 35, StrongFrom = 70, DropRise = 45, DropHold = 0.15f, JumpBy = 35, LowRise = 5, TrustSeconds = 20;
+    const float SoftBelow = 35, StrongFrom = 70, JumpBy = 35, TrustSeconds = 20;
     const int DropMinBars = 2, JumpMinBars = 4;
 
     readonly Random rng = rng ?? new();
     int scene = -1, last = -1, jump, target; // target: bars this scene lasts (0 = pick) // jump: -1 energy fell, +1 rose (change on the next "1")
     double prevPhase;
-    float sinceSure = float.MaxValue, low = 100, sceneEnergy, dropFor;
-    bool armed;
+    float sinceSure = float.MaxValue, sceneEnergy;
+    readonly DropWatch drop = new();
 
     /// <summary>Driving the changes now (enabled, music with a clear beat, two scenes or more).</summary>
     public bool Active { get; private set; }
@@ -44,7 +44,7 @@ public sealed class AutoDjRunner(Random? rng = null)
 
     public string Status(AutoDj c, Project p) =>
         !c.Enabled ? "Apagado"
-        : p.Scenes.Count < 2 ? "Hace falta más de una escena"
+        : p.Scenes.Count(s => !s.Skip) < 2 ? "Hace falta más de una escena en el flujo"
         : !Active ? "Esperando música con ritmo claro; mientras, cada escena usa su duración"
         : $"Compás {Bar + 1}/{Target(c)}" + (Pending != "" ? $" · cambia en el próximo 1 ({Pending})" : "");
 
@@ -55,23 +55,18 @@ public sealed class AutoDjRunner(Random? rng = null)
         if (pl.Current != scene) Reset(pl, m.Energy); // changed by hand, by duration or by the auto strobe
         if (target == 0 || (!c.RandomBars && target != c.Bars) || target < c.Bars || target > Math.Max(c.Bars, c.BarsMax)) target = PickTarget(c);
         sinceSure = m.Locked || m.Confidence >= 0.5f ? 0 : sinceSure + dt;
-        Active = c.Enabled && m.Bpm > 0 && !m.Silence && sinceSure < TrustSeconds && sc.Count > 1;
+        Active = c.Enabled && m.Bpm > 0 && !m.Silence && sinceSure < TrustSeconds && sc.Count(s => !s.Skip) > 1;
         pl.AutoDriving = Active;
         double ph = m.BarPhase;
         bool downbeat = ph < prevPhase - 2; // 3.9 -> 0.1
         prevPhase = ph;
 
-        // drop: the fast energy jumps well above the recent low (a break or build-up) and stays there a moment
-        // (only measured while active: music starting after silence isn't a drop)
-        low = Active ? MathF.Min(m.Energy, low + LowRise * dt) : 100;
-        if (m.Punch - low < DropRise * k / 2) armed = true;
-        dropFor = m.Punch - low > DropRise * k && m.Punch >= StrongFrom ? dropFor + dt : 0;
+        drop.Update(m, dt, Active, k); // only measured while active: music starting after silence isn't a drop
         if (!Active) return;
 
-        if (c.Drops && armed && dropFor >= DropHold && Bar >= DropMinBars)
+        if (c.Drops && drop.Ready && Bar >= DropMinBars)
         {
-            armed = false;
-            m.MarkDownbeat(dropFor); // the drop started when the jump did, on a "1"
+            m.MarkDownbeat(drop.Take()); // the drop started when the jump did, on a "1"
             prevPhase = m.BarPhase;
             Change(pl, 3, "drop", m.Punch);
             return;
@@ -91,7 +86,8 @@ public sealed class AutoDjRunner(Random? rng = null)
     void Change(Player pl, int level, string why, float energy)
     {
         var sc = pl.Project.Scenes;
-        var others = Enumerable.Range(0, sc.Count).Where(i => i != pl.Current).ToList();
+        var others = Enumerable.Range(0, sc.Count).Where(i => i != pl.Current && !sc[i].Skip).ToList();
+        if (others.Count == 0) return;
         int gap = others.Min(i => Math.Abs(sc[i].Level - level));
         var pick = others.Where(i => Math.Abs(sc[i].Level - level) == gap).ToList();
         if (pick.Count > 1) pick.Remove(last);
@@ -110,4 +106,28 @@ public sealed class AutoDjRunner(Random? rng = null)
         Pending = "";
         sceneEnergy = energy;
     }
+}
+
+/// <summary>A drop: the fast energy jumps well above the recent low (a break or build-up) and stays there a moment.</summary>
+public sealed class DropWatch
+{
+    // ponytail: calibration knobs (energy points 0..100, seconds); tuned with synthetic music
+    const float Rise = 45, Hold = 0.15f, LowRise = 5, StrongFrom = 70;
+    float low = 100, held;
+    bool armed;
+
+    /// <summary>A drop is happening and wasn't taken yet.</summary>
+    public bool Ready => armed && held >= Hold;
+
+    /// <param name="on">measuring; off forgets the recent low</param>
+    /// <param name="k">thresholds scale: 0.5 touchy .. 1.5 calm</param>
+    public void Update(MusicMeter m, float dt, bool on, float k)
+    {
+        low = on ? MathF.Min(m.Energy, low + LowRise * dt) : 100;
+        if (m.Punch - low < Rise * k / 2) armed = true; // back near the low: the next jump is a new drop
+        held = m.Punch - low > Rise * k && m.Punch >= StrongFrom ? held + dt : 0;
+    }
+
+    /// <summary>Uses up the drop; seconds since it started.</summary>
+    public float Take() { armed = false; return held; }
 }

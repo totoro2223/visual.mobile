@@ -120,9 +120,15 @@ public sealed class AutoStrobeRunner(Random? rng = null)
             cool = c.Cooldown;
             return true;
         }
-        if (!c.Enabled || !cross || cool > 0 || rng.NextDouble() * 100 >= c.Probability) return false;
+        if (c.Enabled && cross && cool <= 0 && rng.NextDouble() * 100 < c.Probability) Start(c);
+        return false;
+    }
+
+    /// <summary>Starts a burst with the configuration coming next (also when the auto strobe is off: a drop's burst).</summary>
+    public void Start(AutoStrobe c)
+    {
         int k = Upcoming(c);
-        if (k < 0) return false;
+        if (k < 0) return;
         Current = k;
         next = -1;
         var f = c.Configs[k];
@@ -130,6 +136,5 @@ public sealed class AutoStrobeRunner(Random? rng = null)
             ? f.MinDuration + rng.NextDouble() * Math.Max(0, f.MaxDuration - f.MinDuration)
             : f.Duration;
         sinceHit = 0;
-        return false;
     }
 }

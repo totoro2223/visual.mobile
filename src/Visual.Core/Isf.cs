@@ -172,6 +172,7 @@ public sealed class IsfShader
             uniform int FRAMEINDEX;
             uniform int PASSINDEX;
             uniform vec4 DATE;
+            uniform float VISUAL_BEATS; // not ISF: beats of the music so far (at 120 BPM while unknown), for our haze shaders
             varying vec2 isf_FragNormCoord;
             #define vv_FragNormCoord isf_FragNormCoord
 
@@ -199,7 +200,7 @@ public sealed class IsfShader
         return sb.ToString();
     }
 
-    static readonly string[] Builtins = ["TIME", "TIMEDELTA", "RENDERSIZE", "FRAMEINDEX", "PASSINDEX", "DATE", "isf_FragNormCoord", "vv_FragNormCoord", "gl_FragCoord"];
+    static readonly string[] Builtins = ["TIME", "TIMEDELTA", "RENDERSIZE", "FRAMEINDEX", "PASSINDEX", "DATE", "VISUAL_BEATS", "isf_FragNormCoord", "vv_FragNormCoord", "gl_FragCoord"];
     static readonly Regex GlobalInit = new(@"^\s*(?:const\s+)?((?:i|b)?vec[234]|mat[234]|float|int|bool)\s+(\w+)\s*=\s*(.+)$", RegexOptions.Singleline);
     static readonly Regex MainFn = new(@"void\s+main\s*\(\s*(?:void)?\s*\)\s*\{");
 
