@@ -472,6 +472,8 @@ public static class SelfCheck
                 && pvj["Inputs"]![0]!["Name"]!.GetValue<string>() == "zoom" && pvj["Inputs"]![0]!["Max"]![0]!.GetValue<float>() == 4, "vista previa: fuente");
             foreach (var bad in new[] { "..%2Fb.fs", "nada.fs", "b.txt" })
                 Check(http.GetAsync("/shaderSource?k=secreto&name=" + bad).Result.StatusCode == System.Net.HttpStatusCode.BadRequest, "vista previa: rechaza " + bad);
+            var stamps = System.Text.Json.Nodes.JsonNode.Parse(http.GetStringAsync("/shaderStamps?k=secreto").Result)!;
+            Check(stamps["b.fs"]?.GetValue<long>() > 0 && stamps["b.vs"] == null, "vista previa: versiones de los shaders");
 
             // project JSON: download answered by the host thread, upload checked before it is queued
             var dl = http.GetAsync("/project?k=secreto");

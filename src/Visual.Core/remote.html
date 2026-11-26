@@ -727,12 +727,20 @@ function renderFiles() {
 // audio inputs get a fake pulse, picture inputs a gray checker, no global effects.
 const PV_VS = 'attribute vec2 isf_Position;varying vec2 isf_FragNormCoord;void main(){isf_FragNormCoord=isf_Position*0.5+0.5;gl_Position=vec4(isf_Position,0.0,1.0);}';
 const TEX_TYPES = ['Image', 'Audio', 'AudioFFT'];
-const shInfo = new Map(); // name -> Promise of { Frag, Vert, Passes, Buffers, Inputs }
+let pvStamps = {}; // name -> last change of its .fs / .vs (GET /shaderStamps): a changed file is fetched and drawn again
+const pvKey = n => n + '@' + (pvStamps[n] ?? 0);
+const shInfo = new Map(); // name@stamp -> Promise of { Frag, Vert, Passes, Buffers, Inputs }
 function shaderInfo(n) {
-  if (!shInfo.has(n)) shInfo.set(n, fetch('/shaderSource?k=' + encodeURIComponent(K) + '&name=' + encodeURIComponent(n), { cache: 'no-store' })
+  const k = pvKey(n);
+  if (!shInfo.has(k)) shInfo.set(k, fetch('/shaderSource?k=' + encodeURIComponent(K) + '&name=' + encodeURIComponent(n), { cache: 'no-store' })
     .then(async r => { const t = await r.text(); if (!r.ok) throw t; return JSON.parse(t); }));
-  return shInfo.get(n);
+  return shInfo.get(k);
 }
+// a still of each shader (or its error) kept in this browser, for the version it was made from
+const pvStill = {
+  get: n => { try { const o = JSON.parse(store.get('pv:' + n)); return o && o.v === (pvStamps[n] ?? 0) ? o : null; } catch { return null; } },
+  set: (n, o) => store.set('pv:' + n, JSON.stringify({ v: pvStamps[n] ?? 0, ...o })),
+};
 
 function glView(w, h) {
   const cv = el('canvas', { width: w, height: h });
@@ -751,9 +759,16 @@ function glView(w, h) {
   const checker = new Uint8Array(64 * 64 * 4);
   for (let k = 0; k < 64 * 64; k++) { checker.fill(((k % 64 >> 3) + (k >> 9)) % 2 ? 140 : 90, k * 4, k * 4 + 3); checker[k * 4 + 3] = 255; }
   const gray = tex(64, 64, checker), audioPx = new Uint8Array(256 * 4), audioTex = { Audio: tex(256, 1, audioPx), AudioFFT: tex(256, 1, audioPx) };
-  const progs = new Map(); // name -> { p, loc } or { err }
+  const progs = new Map(); // name@stamp -> { p, loc } or { err }
+  const base = k => k.slice(0, k.lastIndexOf('@'));
   function prog(name, info) {
     if (progs.has(name)) return progs.get(name);
+    for (const [k, r] of progs) if (k !== name && base(k) === base(name)) { // an older version of this file
+      if (r.p) gl.deleteProgram(r.p);
+      progs.delete(k);
+      for (const pair of Object.values(bufs.get(k) ?? {})) for (const x of pair) { gl.deleteFramebuffer(x.fb); gl.deleteTexture(x.tex); }
+      bufs.delete(k);
+    }
     const sh = (type, src) => {
       const s = gl.createShader(type);
       gl.shaderSource(s, src);
@@ -786,14 +801,9 @@ function glView(w, h) {
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     return { fb, tex: t };
   };
-  const freeBufs = () => {
-    for (const b of bufs.values()) for (const pair of Object.values(b)) for (const x of pair) { gl.deleteFramebuffer(x.fb); gl.deleteTexture(x.tex); }
-    bufs.clear();
-  };
   const copy = prog('\0copy', { Frag: 'precision mediump float;uniform sampler2D t;varying vec2 isf_FragNormCoord;void main(){gl_FragColor=texture2D(t,isf_FragNormCoord);}' });
   return {
     cv,
-    reset() { for (const [n, r] of progs) if (r.p && n !== '\0copy') { gl.deleteProgram(r.p); progs.delete(n); } freeBufs(); },
     // draws one frame; returns the compile error, if any. vals: name -> number[] (missing = the shader's default)
     draw(name, info, vals, t) {
       const pr = prog(name, info);
@@ -873,28 +883,50 @@ function glView(w, h) {
 }
 
 const pvThumbs = glView(192, 108); // one context draws every thumbnail, copied into each tile (browsers allow few contexts)
-let pvBig = null, tiles = [], tileObs = null, pvOpen = null;
+const PV_LIVE = 6; // at most this many tiles move at once: the ones in the middle of the screen
+let pvBig = null, tiles = [], tileObs = null, midObs = null, pvOpen = null;
 function renderPreview() {
   card('preview', 'Vista previa', 'c-files', true, S.Shaders.length + '');
   if (!pvThumbs) return add(hint('Este navegador no tiene WebGL: no puede mostrar los shaders.'));
-  // fetched again on every rebuild, so a replaced .fs shows its new version
-  shInfo.clear();
-  pvThumbs.reset();
-  pvBig?.reset();
+  // sources and compiled shaders are kept across rebuilds; only a changed file (new stamp) is fetched and compiled again
   tileObs?.disconnect();
+  midObs?.disconnect();
   tileObs = new IntersectionObserver(es => es.forEach(e => e.target.tile.vis = e.isIntersecting));
+  midObs = new IntersectionObserver(es => es.forEach(e => e.target.tile.mid = e.isIntersecting), { rootMargin: '-30% 0px -30% 0px' });
   tiles = S.Shaders.map(name => {
     const c = el('canvas', { width: 192, height: 108 }), lab = el('span', { textContent: name.replace(/\.fs$/i, '') });
     const b = el('button', { class: 'thumb', title: name, onclick: () => openPreview(name) }, c, lab);
-    const t = b.tile = { name, ctx: c.getContext('2d'), lab, vis: false, info: null, err: null };
-    shaderInfo(name).then(i => t.info = i, e => t.err = String(e));
+    b.tile = { name, c, ctx: c.getContext('2d'), lab, vis: false, mid: false, key: null, info: null, asked: false, still: false, bad: false, frames: 0 };
     tileObs.observe(b);
+    midObs.observe(b);
     return b;
   });
   add(el('div', { class: 'thumbs' }, ...tiles));
   tiles = tiles.map(b => b.tile);
-  add(hint('Tocá uno para verlo en grande y probar sus parámetros. Audio simulado, imágenes como patrón gris y sin los efectos globales.'));
+  const mine = tiles;
+  fetch('/shaderStamps?k=' + encodeURIComponent(K), { cache: 'no-store' }).then(r => r.json()).catch(() => ({})).then(st => {
+    pvStamps = st;
+    for (const t of mine) pvReady(t);
+  });
+  add(hint('Se mueven las del medio de la pantalla; las demás muestran una foto guardada en este navegador. Tocá una para verla en grande y probar sus parámetros. Audio simulado, imágenes como patrón gris y sin los efectos globales.'));
 }
+function pvReady(t) { // the tile's saved still, if it is of the current file
+  t.key = pvKey(t.name);
+  const o = pvStill.get(t.name);
+  if (o?.err) return pvBad(t, o.err);
+  if (!o?.img) return;
+  t.still = true;
+  const im = new Image();
+  im.onload = () => { if (!t.frames) t.ctx.drawImage(im, 0, 0); };
+  im.src = o.img;
+}
+function pvBad(t, e) {
+  t.bad = true;
+  t.lab.classList.add('bad');
+  t.lab.textContent = '⚠ ' + t.lab.textContent;
+  t.lab.parentNode.title = e;
+}
+function pvFail(t, e) { pvStill.set(t.name, { err: String(e) }); pvBad(t, String(e)); } // kept: not tried again until the file changes
 
 const pv = el('div', { id: 'pv' });
 document.body.append(pv);
@@ -918,7 +950,7 @@ function openPreview(name) {
   let info = null, bad = false;
   const me = pvOpen = { frame: t => {
     if (!info || bad) return;
-    const e = pvBig.draw(name, info, vals, t);
+    const e = pvBig.draw(pvKey(name), info, vals, t);
     if (e) { bad = true; msg.replaceChildren(el('pre', { textContent: e })); }
   } };
   shaderInfo(name).then(i => {
@@ -956,11 +988,28 @@ function pvLoop(now) {
   const t = now / 1000;
   if (pvOpen) return pvOpen.frame(t); // the grid is covered
   if (tab !== 'files') return;
+  // the middle ones move; a visible one without a still is drawn ~1 s (two at a time) to take its picture, then stays still
+  let live = 0, fresh = 0;
   for (const x of tiles) {
-    if (!x.vis || x.bad || !(x.info || x.err)) continue;
-    const e = x.err ?? pvThumbs.draw(x.name, x.info, null, t);
-    if (e) { x.bad = true; x.lab.classList.add('bad'); x.lab.textContent = '⚠ ' + x.lab.textContent; x.lab.parentNode.title = e; continue; }
+    if (!x.key || x.bad || !x.vis) continue;
+    if (x.mid && live < PV_LIVE) live++;
+    else if (!x.still && fresh < 2) fresh++;
+    else continue;
+    if (!x.info) {
+      if (!x.asked) {
+        x.asked = true;
+        shaderInfo(x.name).then(i => x.info = i, e => {
+          if (typeof e === 'string') return pvFail(x, e); // the app refused it: broken header / macro
+          shInfo.delete(x.key); // connection problem: try again later
+          x.asked = false;
+        });
+      }
+      continue;
+    }
+    const e = pvThumbs.draw(x.key, x.info, null, t);
+    if (e) { pvFail(x, e); continue; }
     x.ctx.drawImage(pvThumbs.cv, 0, 0);
+    if (++x.frames === 30 && !x.still) { x.still = true; pvStill.set(x.name, { img: x.c.toDataURL('image/jpeg', 0.7) }); }
   }
 }
 if (pvThumbs) requestAnimationFrame(pvLoop);

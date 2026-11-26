@@ -168,6 +168,9 @@ public sealed class RemoteServer : IDisposable
                     Commands.Enqueue(new JsonObject { ["op"] = "import", ["text"] = text });
                     await Reply(s, 200, "text/plain", "ok"u8.ToArray());
                     break;
+                case ("GET", "/shaderStamps"): // name -> last change (ms) of its .fs / .vs: the page re-fetches and re-draws only what changed
+                    await Reply(s, 200, "application/json; charset=utf-8", Encoding.UTF8.GetBytes(Remote.ShaderStamps(ShaderFolder)));
+                    break;
                 case ("GET", "/shaderSource"):
                     try
                     {
@@ -471,6 +474,14 @@ public static class Remote
         if (name != Path.GetFileName(name) || name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || name.StartsWith('.')
             || !(name.EndsWith(".fs", StringComparison.OrdinalIgnoreCase) || vertex && name.EndsWith(".vs", StringComparison.OrdinalIgnoreCase)))
             throw new ArgumentException($"Nombre de shader inválido: {name}");
+    }
+
+    public static string ShaderStamps(string? folder)
+    {
+        if (folder == null || !Directory.Exists(folder)) return "{}";
+        static long Ms(string f) => File.Exists(f) ? new DateTimeOffset(File.GetLastWriteTimeUtc(f)).ToUnixTimeMilliseconds() : 0;
+        return JsonSerializer.Serialize(Directory.GetFiles(folder, "*.fs").ToDictionary(f => Path.GetFileName(f),
+            f => Math.Max(Ms(f), Ms(Path.ChangeExtension(f, ".vs")))));
     }
 
     /// <summary>GET /shaderSource: the GLSL ES sources the TV compiles (the browser draws them with WebGL), passes and inputs.</summary>
