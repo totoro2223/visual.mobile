@@ -18,7 +18,8 @@ namespace VisualApp;
 /// Full-screen visualizer for phones and Google TV. There is no editing UI on the TV:
 /// everything is edited from the Wi-Fi remote page (phone or PC browser), whose QR is shown on screen.
 /// </summary>
-[Activity(Label = "Visual", MainLauncher = true, Exported = true,
+// SingleTask: a second instance couldn't open the remote's port, and the paused first one would keep it without answering
+[Activity(Label = "Visual", MainLauncher = true, Exported = true, LaunchMode = LaunchMode.SingleTask,
     Theme = "@android:style/Theme.Black.NoTitleBar.Fullscreen",
     ScreenOrientation = ScreenOrientation.SensorLandscape,
     ConfigurationChanges = ConfigChanges.Orientation | ConfigChanges.ScreenSize | ConfigChanges.ScreenLayout | ConfigChanges.SmallestScreenSize
@@ -127,6 +128,7 @@ public class MainActivity : Activity
     {
         view.OnPause(); // waits for the GL thread to stop, so saving here doesn't race a frame
         engine.Save();
+        if (IsFinishing) engine.Stop(); // free the port and the audio now: OnDestroy can run after the next OnCreate
         base.OnPause();
     }
 

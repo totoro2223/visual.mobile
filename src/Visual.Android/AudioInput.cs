@@ -62,6 +62,7 @@ sealed class AudioInput(Context ctx, AudioAnalyzer analyzer, int netPort, string
             // Visualizer on the global output mix (8-bit, ~20 captures/s): silent on some devices for
             // passthrough / DRM audio; the mic or a USB input is the way around that
             viz = new Visualizer(0);
+            viz.SetEnabled(false); // the session 0 engine is shared and may come already enabled, where SetCaptureSize throws
             viz.SetCaptureSize(Visualizer.GetCaptureSizeRange()![1]);
             viz.SetDataCaptureListener(new Capture(analyzer), Visualizer.MaxCaptureRate, true, false);
             viz.SetEnabled(true);
