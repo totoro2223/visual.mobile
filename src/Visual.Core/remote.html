@@ -48,12 +48,13 @@ input[type=checkbox]{width:24px;height:24px}
 select,input[type=number],button.sm{background:#2a2a2a;color:var(--fg);border:1px solid #3a3a3a;border-radius:8px;padding:10px 12px;font-size:16px}
 input[type=range]{height:32px}
 .mod{margin:0 0 14px 6px;padding-left:10px;border-left:2px solid #333}
-.srow{display:flex;align-items:center;gap:6px;padding:8px;margin:6px 0;background:#262626;border-radius:8px}
+.srow{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:8px;margin:6px 0;background:#262626;border-radius:8px}
 .srow.cur{outline:2px solid var(--acc)}
 .srow.skip>:not(.flow){opacity:.4}
 .sinfo{flex:1;min-width:0}
 .thumb{width:56px;height:32px;flex:none;border-radius:4px;background:#111;object-fit:cover}
-.sinfo>div:first-child{overflow-wrap:anywhere}
+.stitle{flex-basis:100%;overflow-wrap:anywhere}
+.stitle small{color:#5e8;font-size:13px}
 .sinfo small{display:block;color:#5e8;margin-top:2px;font-size:13px}
 .prog{font-size:13px;color:var(--mut);margin-top:4px}
 .prog .bar{height:5px;margin:3px 0 0}
@@ -444,13 +445,14 @@ function renderLive() {
     const dur = num(s.Duration, x => { s.Duration = x; edit('dur' + i, { op: 'duration', scene: i, value: x }); });
     dur.title = dur.ariaLabel = 'Duración (s), 0 = manual';
     add(el('div', { class: 'srow' + (cur ? ' cur' : '') + (s.Skip ? ' skip' : '') },
+      el('div', { class: 'stitle', textContent: (i + 1) + '. ' + s.Title }, el('small', { textContent: ' · ' + LEVELS[s.Level].toLowerCase() })), // own line: room for the name on a phone
       el('input', { type: 'checkbox', className: 'flow', checked: !s.Skip, ariaLabel: 'En el flujo',
         title: 'En el flujo. Destildada: Siguiente, la duración y el Auto DJ la saltean (con ▶ se reproduce igual)',
         onchange: e => { s.Skip = !e.target.checked; e.target.closest('.srow').classList.toggle('skip', s.Skip); post({ op: 'flow', scene: i, on: e.target.checked }); } }),
       el('button', { class: 'sm play' + (cur ? ' on' : ''), textContent: '▶', ariaLabel: 'Pasar a esta escena', onclick: () => post({ op: 'goto', i }) }),
       s.Th ? el('img', { class: 'thumb', alt: '', src: `/thumb?k=${encodeURIComponent(K)}&i=${i}&v=${s.Th}` })
         : el('span', { class: 'thumb', title: 'Sin vista previa: aparece cuando la escena se reproduce' }),
-      el('div', { class: 'sinfo' }, el('div', { textContent: (i + 1) + '. ' + s.Title }, el('small', { textContent: ' · ' + LEVELS[s.Level].toLowerCase() })),
+      el('div', { class: 'sinfo' },
         ...(s.Fx.length ? [el('small', { textContent: s.Fx.join(' · ') })] : []),
         ...(cur ? [el('div', { id: 'sprog', class: 'prog' }, el('span'), el('div', { class: 'bar' }, el('i')))] : [])),
       el('button', { class: 'sm', textContent: '▲', ariaLabel: 'Subir', disabled: i === 0, onclick: () => post({ op: 'move', i, to: i - 1 }) }),
